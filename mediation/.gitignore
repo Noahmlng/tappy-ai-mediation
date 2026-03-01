@@ -10,6 +10,7 @@ data/house-ads/*
 !data/house-ads/reports/
 data/house-ads/curated/*
 !data/house-ads/curated/.gitkeep
+!data/house-ads/curated/manual-brand-seeds.jsonl
 data/house-ads/reports/*
 !data/house-ads/reports/.gitkeep
 data/house-ads/offers/*

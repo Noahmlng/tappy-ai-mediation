@@ -185,7 +185,6 @@
           "snippet",
           "product_id",
           "merchant",
-          "price",
           "currency",
           "availability",
           "tags",

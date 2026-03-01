@@ -1,6 +1,21 @@
 export const VERTICAL_TAXONOMY = [
   { vertical_l1: 'consumer_electronics', vertical_l2: 'smartphone', keywords: ['smartphone', 'phone'] },
   { vertical_l1: 'consumer_electronics', vertical_l2: 'laptop', keywords: ['laptop', 'notebook'] },
+  {
+    vertical_l1: 'consumer_electronics',
+    vertical_l2: 'wearables',
+    keywords: ['smartwatch', 'fitness tracker', 'wearable tech'],
+  },
+  {
+    vertical_l1: 'consumer_electronics',
+    vertical_l2: 'vr_ar',
+    keywords: ['virtual reality', 'augmented reality', 'vr headset'],
+  },
+  {
+    vertical_l1: 'consumer_electronics',
+    vertical_l2: 'smart_home_devices',
+    keywords: ['smart home', 'home automation', 'smart speaker'],
+  },
   { vertical_l1: 'home_appliance', vertical_l2: 'kitchen_appliance', keywords: ['kitchen appliance', 'cookware'] },
   { vertical_l1: 'beauty_personal_care', vertical_l2: 'skincare', keywords: ['skincare', 'beauty'] },
   { vertical_l1: 'beauty_personal_care', vertical_l2: 'cosmetics', keywords: ['makeup', 'cosmetics'] },
@@ -8,13 +23,63 @@ export const VERTICAL_TAXONOMY = [
   { vertical_l1: 'fashion', vertical_l2: 'footwear', keywords: ['shoes', 'footwear'] },
   { vertical_l1: 'baby_parenting', vertical_l2: 'baby_products', keywords: ['baby products', 'parenting'] },
   { vertical_l1: 'sports_outdoor', vertical_l2: 'fitness', keywords: ['fitness', 'sports gear'] },
+  {
+    vertical_l1: 'health_wellness',
+    vertical_l2: 'fitness',
+    keywords: ['fitness equipment', 'gym membership', 'home workout'],
+  },
   { vertical_l1: 'food_beverage', vertical_l2: 'snacks', keywords: ['snacks', 'food'] },
+  {
+    vertical_l1: 'food_beverage',
+    vertical_l2: 'grocery_delivery',
+    keywords: ['grocery delivery', 'local grocery', 'organic grocery'],
+  },
+  {
+    vertical_l1: 'food_beverage',
+    vertical_l2: 'meal_kits',
+    keywords: ['meal kit', 'recipe box', 'weekly meal subscription'],
+  },
+  {
+    vertical_l1: 'food_beverage',
+    vertical_l2: 'beverages',
+    keywords: ['coffee', 'tea', 'soft drinks', 'sparkling water'],
+  },
   { vertical_l1: 'mobility', vertical_l2: 'automotive', keywords: ['automotive', 'car accessories'] },
+  {
+    vertical_l1: 'mobility',
+    vertical_l2: 'electric_vehicles',
+    keywords: ['electric vehicle', 'ev lease', 'ev charging'],
+  },
+  {
+    vertical_l1: 'mobility',
+    vertical_l2: 'car_rentals',
+    keywords: ['car rental', 'vehicle hire', 'airport car rental'],
+  },
+  {
+    vertical_l1: 'mobility',
+    vertical_l2: 'car_accessories',
+    keywords: ['car accessories', 'seat cover', 'bluetooth car kit'],
+  },
+  {
+    vertical_l1: 'mobility',
+    vertical_l2: 'electric_transportation',
+    keywords: ['e-bike', 'e scooter', 'electric bike'],
+  },
   { vertical_l1: 'education', vertical_l2: 'online_learning', keywords: ['online learning', 'education platform'] },
   { vertical_l1: 'finance', vertical_l2: 'digital_banking', keywords: ['digital banking', 'fintech'] },
   { vertical_l1: 'saas', vertical_l2: 'productivity', keywords: ['productivity software', 'project management'] },
   { vertical_l1: 'developer_tools', vertical_l2: 'dev_platform', keywords: ['developer tools', 'software platform'] },
   { vertical_l1: 'gaming_entertainment', vertical_l2: 'gaming', keywords: ['gaming', 'game publisher'] },
+  {
+    vertical_l1: 'gaming_entertainment',
+    vertical_l2: 'movies_streaming',
+    keywords: ['streaming service', 'movie subscription', 'video streaming'],
+  },
+  {
+    vertical_l1: 'gaming_entertainment',
+    vertical_l2: 'music',
+    keywords: ['music streaming', 'vinyl records', 'audio subscription'],
+  },
   { vertical_l1: 'travel_hospitality', vertical_l2: 'hotel_booking', keywords: ['hotel booking', 'travel service'] },
   { vertical_l1: 'local_services', vertical_l2: 'food_delivery', keywords: ['food delivery', 'local service'] },
   { vertical_l1: 'health_wellness', vertical_l2: 'healthcare', keywords: ['healthcare', 'wellness'] },
@@ -22,6 +87,16 @@ export const VERTICAL_TAXONOMY = [
   { vertical_l1: 'home_improvement', vertical_l2: 'home_decor', keywords: ['home decor', 'furniture'] },
   { vertical_l1: 'art_culture', vertical_l2: 'craft', keywords: ['craft', 'creative supplies'] },
   { vertical_l1: 'b2b_services', vertical_l2: 'business_service', keywords: ['business service', 'enterprise service'] },
+  {
+    vertical_l1: 'sustainability',
+    vertical_l2: 'eco_friendly_goods',
+    keywords: ['eco friendly', 'biodegradable', 'sustainable goods'],
+  },
+  {
+    vertical_l1: 'sustainability',
+    vertical_l2: 'renewable_energy',
+    keywords: ['solar panel', 'wind energy', 'renewable energy'],
+  },
 ]
 
 export const SEARCH_TEMPLATES = {

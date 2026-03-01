@@ -13,6 +13,7 @@ import {
   hashId,
   timestampTag,
 } from './lib/common.js'
+import { sourcePolicyForCategory } from './lib/category-policy.js'
 
 const OFFERS_ROOT = path.resolve(process.cwd(), 'data/house-ads/offers')
 const OFFER_JOBS_DIR = path.join(OFFERS_ROOT, 'raw', 'offer-jobs')
@@ -329,6 +330,15 @@ async function main() {
 
   for (const job of scopedJobs) {
     const brandId = cleanText(job.brand_id)
+    const sourcePolicy = sourcePolicyForCategory(job.vertical_l1, job.vertical_l2, 'default')
+    if (sourcePolicy === 'real_only') {
+      skippedBrands.push({
+        brand_id: brandId,
+        reason: 'category_real_only',
+        category_key: `${cleanText(job.vertical_l1)}::${cleanText(job.vertical_l2)}`,
+      })
+      continue
+    }
     const existingProduct = realProductCountByBrand.get(brandId) || 0
     const targetCount = targetProductCount(job, existingProduct, {
       fillMode,

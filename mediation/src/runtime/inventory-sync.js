@@ -71,6 +71,8 @@ function mapHouseOfferRowToUnifiedOffer(row = {}) {
   const verticalL2 = cleanText(row.vertical_l2)
   const imageUrl = cleanText(row.image_url)
   const productId = cleanText(row.product_id)
+  const price = toHouseNumber(row.price, NaN)
+  const originalPrice = toHouseNumber(row.original_price, NaN)
   const tags = Array.isArray(row.tags_json)
     ? row.tags_json.map((item) => cleanText(String(item || ''))).filter(Boolean)
     : []
@@ -108,6 +110,13 @@ function mapHouseOfferRowToUnifiedOffer(row = {}) {
       sourceType: cleanText(row.source_type),
       placementKey: 'next_step.intent_card',
       disclosure: cleanText(row.disclosure),
+      price: Number.isFinite(price) && price > 0 ? Number(price.toFixed(2)) : undefined,
+      originalPrice:
+        Number.isFinite(originalPrice) && originalPrice > 0
+          ? Number(originalPrice.toFixed(2))
+          : undefined,
+      currency: currency || 'USD',
+      price_missing: !(Number.isFinite(price) && price > 0),
       image_url: imageUrl,
       imageUrl,
     },
@@ -149,6 +158,8 @@ async function fetchHouseOffersForSync(pool, options = {}) {
           product_id,
           merchant,
           currency,
+          price,
+          original_price,
           discount_pct,
           availability,
           tags_json

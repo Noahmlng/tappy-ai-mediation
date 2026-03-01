@@ -160,7 +160,7 @@ function normalizeProductOffer(signal, candidate, idx) {
   const title = cleanText(candidate.title || '').slice(0, 120)
   const snippet = cleanText(candidate.snippet || candidate.description || '').slice(0, 240)
   const price = toPositiveNumber(candidate.price)
-  if (!title || !snippet || price === null) return null
+  if (!title || !snippet) return null
 
   const originalPrice = toPositiveNumber(candidate.original_price)
   const imageUrl = safeUrl(candidate.image_url || '')
@@ -184,7 +184,6 @@ function normalizeProductOffer(signal, candidate, idx) {
     last_verified_at: cleanText(signal.updated_at) || new Date().toISOString(),
     product_id: cleanText(candidate.product_id || `prd_${hashId(`${brandId}|${targetUrl}|${title}`, 10)}`),
     merchant: cleanText(candidate.merchant || signal.brand_name || brandId),
-    price,
     currency: normalizeCurrency(candidate.currency),
     availability: normalizeAvailability(candidate.availability),
     tags: normalizeTags(candidate, signal),
@@ -193,9 +192,12 @@ function normalizeProductOffer(signal, candidate, idx) {
   }
   if (imageUrl) output.image_url = imageUrl
 
-  if (originalPrice && originalPrice >= price) {
-    output.original_price = originalPrice
-    output.discount_pct = Number((((originalPrice - price) / originalPrice) * 100).toFixed(2))
+  if (price !== null) {
+    output.price = price
+    if (originalPrice && originalPrice >= price) {
+      output.original_price = originalPrice
+      output.discount_pct = Number((((originalPrice - price) / originalPrice) * 100).toFixed(2))
+    }
   }
   return output
 }
@@ -246,7 +248,12 @@ function validateOffer(offer) {
     for (const field of ['snippet', 'product_id', 'merchant', 'currency', 'availability', 'language', 'disclosure']) {
       if (!nonEmpty(offer[field])) errors.push(`missing_or_empty_${field}`)
     }
-    if (!(typeof offer.price === 'number' && offer.price > 0)) errors.push('invalid_price')
+    if (
+      'price' in offer
+      && !(typeof offer.price === 'number' && offer.price > 0)
+    ) {
+      errors.push('invalid_price')
+    }
     if (!VALID_AVAILABILITY.has(offer.availability)) errors.push('invalid_availability')
     if (!/^[A-Z]{3}$/.test(String(offer.currency || ''))) errors.push('invalid_currency')
   }
@@ -404,7 +411,14 @@ async function main() {
   )
 }
 
-main().catch((error) => {
-  console.error('[normalize-offers] failed:', error?.message || error)
-  process.exit(1)
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch((error) => {
+    console.error('[normalize-offers] failed:', error?.message || error)
+    process.exit(1)
+  })
+}
+
+export const __normalizeOffersInternal = Object.freeze({
+  normalizeProductOffer,
+  validateOffer,
 })

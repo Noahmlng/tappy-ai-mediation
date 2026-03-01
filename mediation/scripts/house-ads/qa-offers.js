@@ -5,6 +5,7 @@ import {
   CURATED_ROOT,
   parseArgs,
   toInteger,
+  toBoolean,
   cleanText,
   readJson,
   readJsonl,
@@ -14,6 +15,12 @@ import {
   registrableDomain,
   timestampTag,
 } from './lib/common.js'
+import {
+  categoryKey,
+  sourcePolicyForCategory,
+  isDeferredSensitiveCategory,
+  hasBlockedKeyword,
+} from './lib/category-policy.js'
 
 const OFFERS_ROOT = path.resolve(process.cwd(), 'data/house-ads/offers')
 const OFFERS_CURATED_DIR = path.join(OFFERS_ROOT, 'curated')
@@ -63,6 +70,7 @@ const RISKY_TERMS = [
   'loan shark',
   'counterfeit',
 ]
+const IMAGE_EXT_RE = /\.(png|jpe?g|webp|gif|svg|avif|bmp|ico)(\?|#|$)/i
 
 function toNumber(value, fallback = 0) {
   const num = Number(value)
@@ -132,7 +140,109 @@ function isNonEmptyString(value) {
   return typeof value === 'string' && cleanText(value).length > 0
 }
 
-function validateOffer(offer, brandMap, options) {
+function normalizeImageContentType(value = '') {
+  return cleanText(value).toLowerCase().split(';')[0]
+}
+
+function isImageContentType(value = '') {
+  return normalizeImageContentType(value).startsWith('image/')
+}
+
+function looksLikeImageUrl(url = '') {
+  return IMAGE_EXT_RE.test(cleanText(url))
+}
+
+function classifyFetchError(error) {
+  const message = cleanText(error?.message || String(error || '')).toLowerCase()
+  const name = cleanText(error?.name || '').toLowerCase()
+  if (name.includes('abort') || message.includes('abort') || message.includes('timeout')) return 'timeout'
+  if (message.includes('enotfound') || message.includes('getaddrinfo') || message.includes('dns')) return 'dns'
+  return 'request_error'
+}
+
+async function probeImageUrl(url, timeoutMs = 10000) {
+  const target = safeUrl(url)
+  if (!target) {
+    return {
+      ok: false,
+      status: 0,
+      valid_image: false,
+      status_class: 'invalid_image_url',
+      content_type: '',
+      error_class: 'invalid_image_url',
+      error_message: 'invalid_image_url',
+    }
+  }
+
+  const run = async (method) => {
+    const response = await fetch(target, {
+      method,
+      redirect: 'follow',
+      signal: AbortSignal.timeout(Math.max(1000, timeoutMs)),
+      headers: {
+        'user-agent': 'house-ads-qa-offers/1.0',
+      },
+    })
+    const contentType = normalizeImageContentType(response.headers.get('content-type') || '')
+    return {
+      status: Number(response.status) || 0,
+      content_type: contentType,
+      valid_image:
+        response.status >= 200
+        && response.status < 400
+        && (isImageContentType(contentType) || looksLikeImageUrl(response.url || target)),
+      status_class:
+        response.status >= 200 && response.status < 300
+          ? '2xx'
+          : response.status >= 300 && response.status < 400
+            ? '3xx'
+            : response.status >= 400 && response.status < 500
+              ? '4xx'
+              : response.status >= 500 && response.status < 600
+                ? '5xx'
+                : 'other_http',
+    }
+  }
+
+  try {
+    let result = await run('HEAD')
+    if ([403, 405].includes(result.status)) result = await run('GET')
+    return {
+      ok: result.valid_image,
+      status: result.status,
+      valid_image: result.valid_image,
+      status_class: result.status_class,
+      content_type: result.content_type,
+      error_class: '',
+      error_message: '',
+    }
+  } catch (error) {
+    const errorClass = classifyFetchError(error)
+    return {
+      ok: false,
+      status: 0,
+      valid_image: false,
+      status_class: errorClass,
+      content_type: '',
+      error_class: errorClass,
+      error_message: cleanText(error?.message || String(error)),
+    }
+  }
+}
+
+function ensurePriceMissingTag(offer = {}) {
+  if (cleanText(offer.offer_type).toLowerCase() !== 'product') return offer
+  if (typeof offer.price === 'number' && offer.price > 0) return offer
+  const tags = Array.isArray(offer.tags) ? [...offer.tags] : []
+  const exists = tags.some((tag) => cleanText(tag).toLowerCase() === 'price_missing')
+  if (!exists) tags.push('price_missing')
+  return {
+    ...offer,
+    tags,
+  }
+}
+
+function validateOffer(offer, brandMap, options, imageProbe = null) {
   const reasons = []
 
   const offerType = cleanText(offer.offer_type).toLowerCase()
@@ -152,6 +262,14 @@ function validateOffer(offer, brandMap, options) {
   if (hasRiskyTerm(`${title} ${cleanText(offer.description)} ${cleanText(offer.snippet)}`)) {
     reasons.push('contains_risky_term')
   }
+  if (options.sensitiveBlock && hasBlockedKeyword(
+    `${title} ${cleanText(offer.description)} ${cleanText(offer.snippet)} ${JSON.stringify(offer.tags || [])}`,
+  )) {
+    reasons.push('blocked_keyword_sensitive')
+  }
+  if (options.sensitiveBlock && isDeferredSensitiveCategory(offer.vertical_l1, offer.vertical_l2)) {
+    reasons.push('category_deferred_sensitive')
+  }
 
   if (status !== 'active') reasons.push('status_not_active')
 
@@ -165,6 +283,13 @@ function validateOffer(offer, brandMap, options) {
 
   const targetDomain = classifyTargetDomain(targetUrl)
   if (targetDomain.blocked) reasons.push(`target_domain_blocked:${targetDomain.reason}`)
+  if (
+    options.sourcePolicy === 'real_only'
+    && sourcePolicyForCategory(offer.vertical_l1, offer.vertical_l2, 'default') === 'real_only'
+    && sourceType !== 'real'
+  ) {
+    reasons.push('category_requires_real_source')
+  }
 
   const brand = brandMap.get(brandId)
   const brandDomain = registrableDomain(brand?.official_domain || '')
@@ -200,13 +325,23 @@ function validateOffer(offer, brandMap, options) {
     for (const field of ['snippet', 'product_id', 'merchant', 'currency', 'availability', 'language', 'disclosure']) {
       if (!isNonEmptyString(offer[field])) reasons.push(`missing_or_empty_${field}`)
     }
-    if (!(typeof offer.price === 'number' && offer.price > 0)) reasons.push('invalid_price')
+    if ('price' in offer && !(typeof offer.price === 'number' && offer.price > 0)) reasons.push('invalid_price')
     if ('original_price' in offer && !(typeof offer.original_price === 'number' && offer.original_price >= offer.price)) {
       reasons.push('invalid_original_price')
     }
     if (!/^[A-Z]{3}$/.test(cleanText(offer.currency || ''))) reasons.push('invalid_currency')
     if (!VALID_AVAILABILITY.has(cleanText(offer.availability || ''))) reasons.push('invalid_availability')
     if (!Array.isArray(offer.tags) || offer.tags.length === 0) reasons.push('invalid_tags')
+  }
+
+  if (options.imageHardGate) {
+    const imageUrl = safeUrl(offer.image_url)
+    if (!imageUrl) {
+      reasons.push('missing_or_invalid_image_url')
+    } else if (!imageProbe || imageProbe.valid_image !== true) {
+      const reason = cleanText(imageProbe?.status_class) || cleanText(imageProbe?.error_class) || 'image_probe_failed'
+      reasons.push(`invalid_image_url:${reason}`)
+    }
   }
 
   return [...new Set(reasons)]
@@ -258,6 +393,10 @@ async function main() {
   const minConfidenceReal = Number(args['min-confidence-real'] || 0.55)
   const minConfidenceSynthetic = Number(args['min-confidence-synthetic'] || 0.6)
   const maxOffers = toInteger(args['max-offers'], 0)
+  const sourcePolicy = cleanText(args['source-policy'] || 'default').toLowerCase()
+  const imageHardGate = toBoolean(args['image-hard-gate'], false)
+  const sensitiveBlock = toBoolean(args['sensitive-block'], false)
+  const imageTimeoutMs = toInteger(args['image-timeout-ms'], 10000)
 
   const offersFile = await resolveOffersFile(args)
   const brandsFile = path.resolve(process.cwd(), cleanText(args['brands-file']) || path.join(CURATED_ROOT, 'brands.jsonl'))
@@ -312,12 +451,26 @@ async function main() {
 
   const accepted = []
   const rejected = [...duplicateRejected]
+  const imageProbeCache = new Map()
 
-  for (const offer of dedupeMap.values()) {
+  for (const rawOffer of dedupeMap.values()) {
+    const offer = ensurePriceMissingTag(rawOffer)
+    let imageProbe = null
+    if (imageHardGate && cleanText(offer.image_url)) {
+      const cacheKey = cleanText(offer.image_url)
+      if (!imageProbeCache.has(cacheKey)) {
+        imageProbeCache.set(cacheKey, await probeImageUrl(cacheKey, imageTimeoutMs))
+      }
+      imageProbe = imageProbeCache.get(cacheKey) || null
+    }
+
     const reasons = validateOffer(offer, brandMap, {
       minConfidenceReal,
       minConfidenceSynthetic,
-    })
+      sourcePolicy,
+      imageHardGate,
+      sensitiveBlock,
+    }, imageProbe)
     if (reasons.length > 0) {
       rejected.push({
         offer_id: cleanText(offer.offer_id),
@@ -347,6 +500,10 @@ async function main() {
     thresholds: {
       min_confidence_real: minConfidenceReal,
       min_confidence_synthetic: minConfidenceSynthetic,
+      source_policy: sourcePolicy,
+      image_hard_gate: imageHardGate,
+      sensitive_block: sensitiveBlock,
+      image_timeout_ms: imageTimeoutMs,
     },
     counts: {
       input_offers: offers.length,
@@ -364,6 +521,11 @@ async function main() {
       partner: accepted.filter((item) => cleanText(item.source_type) === 'partner').length,
       synthetic: accepted.filter((item) => cleanText(item.source_type) === 'synthetic').length,
     },
+    accepted_product_price_missing: accepted.filter((item) =>
+      cleanText(item.offer_type) === 'product'
+      && !(typeof item.price === 'number' && item.price > 0)
+      && Array.isArray(item.tags)
+      && item.tags.some((tag) => cleanText(tag).toLowerCase() === 'price_missing')).length,
     accepted_unique_brands: new Set(accepted.map((item) => cleanText(item.brand_id))).size,
     rejected_reason_distribution: reasonDistribution(rejected),
     output_files: {
@@ -400,7 +562,15 @@ async function main() {
   )
 }
 
-main().catch((error) => {
-  console.error('[qa-offers] failed:', error?.message || error)
-  process.exit(1)
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch((error) => {
+    console.error('[qa-offers] failed:', error?.message || error)
+    process.exit(1)
+  })
+}
+
+export const __qaOffersInternal = Object.freeze({
+  validateOffer,
+  ensurePriceMissingTag,
+  probeImageUrl,
 })

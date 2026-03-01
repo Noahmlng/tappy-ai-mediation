@@ -24,6 +24,8 @@ function makeHouseRow(index) {
     confidence_score: 0.8,
     product_id: `product_${id}`,
     merchant: `Merchant ${id}`,
+    price: 129.99,
+    original_price: 159.99,
     currency: 'USD',
     discount_pct: 20,
     availability: 'in_stock',
@@ -35,9 +37,10 @@ function createMockPool(rows = []) {
   let rawUpserts = 0
   let normUpserts = 0
   const syncRuns = []
+  const normMetadata = []
   return {
     getStats() {
-      return { rawUpserts, normUpserts, syncRuns }
+      return { rawUpserts, normUpserts, syncRuns, normMetadata }
     },
     async query(sql, params = []) {
       const text = String(sql || '')
@@ -64,6 +67,11 @@ function createMockPool(rows = []) {
       }
       if (text.includes('INSERT INTO offer_inventory_norm')) {
         normUpserts += 1
+        try {
+          normMetadata.push(JSON.parse(String(params[15] || '{}')))
+        } catch {
+          normMetadata.push({})
+        }
         return { rows: [] }
       }
       return { rows: [] }
@@ -94,4 +102,9 @@ test('syncInventoryNetworks house supports multi-page sync beyond 500 records', 
   const stats = pool.getStats()
   assert.equal(stats.rawUpserts, 2300)
   assert.equal(stats.normUpserts, 2300)
+  assert.equal(stats.normMetadata.length, 2300)
+  assert.equal(typeof stats.normMetadata[0]?.price_missing, 'boolean')
+  assert.equal(stats.normMetadata[0]?.price, 129.99)
+  assert.equal(stats.normMetadata[0]?.originalPrice, 159.99)
+  assert.equal(stats.normMetadata[0]?.currency, 'USD')
 })

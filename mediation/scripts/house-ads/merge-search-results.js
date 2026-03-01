@@ -2,6 +2,7 @@
 import path from 'node:path'
 import {
   RAW_ROOT,
+  CURATED_ROOT,
   parseArgs,
   toInteger,
   toBoolean,
@@ -24,6 +25,7 @@ import { VERTICAL_TAXONOMY } from './lib/vertical-taxonomy.js'
 const SEARCH_JOBS_DIR = path.join(RAW_ROOT, 'search-jobs')
 const SEARCH_RESULTS_DIR = path.join(RAW_ROOT, 'search-results')
 const BRAND_SEEDS_DIR = path.join(RAW_ROOT, 'brand-seeds')
+const DEFAULT_MANUAL_SEEDS_FILE = path.join(CURATED_ROOT, 'manual-brand-seeds.jsonl')
 
 const BLOCKED_DOMAINS = new Set([
   'duckduckgo.com',
@@ -314,6 +316,73 @@ function mergeToBrandSeeds(resultRecords = []) {
   })
 }
 
+function normalizeManualSeed(seed = {}) {
+  const brandName = cleanText(seed.brand_name || seed.name)
+  const candidateDomains = Array.isArray(seed.candidate_domains)
+    ? seed.candidate_domains
+    : [seed.official_domain || seed.domain]
+  const domain = candidateDomains
+    .map((item) => registrableDomain(item))
+    .find(Boolean)
+  const verticalL1 = cleanText(seed.vertical_l1)
+  const verticalL2 = cleanText(seed.vertical_l2)
+
+  if (!brandName || !domain || !verticalL1 || !verticalL2) return null
+
+  return {
+    seed_id: cleanText(seed.seed_id || `seed_manual_${hashId(`${domain}|${brandName}`)}`),
+    brand_name: brandName,
+    candidate_domains: [domain],
+    vertical_l1: verticalL1,
+    vertical_l2: verticalL2,
+    market: cleanText(seed.market) || 'US',
+    source_confidence: Number.isFinite(Number(seed.source_confidence))
+      ? Number(seed.source_confidence)
+      : 0.9,
+    search_hit_count: Number.isFinite(Number(seed.search_hit_count))
+      ? Math.max(1, Number(seed.search_hit_count))
+      : 1,
+    evidence_queries: Array.isArray(seed.evidence_queries) ? seed.evidence_queries.slice(0, 8) : ['manual_seed'],
+    evidence_urls: Array.isArray(seed.evidence_urls) ? seed.evidence_urls.slice(0, 12) : [`https://${domain}`],
+    status: 'pending_verification',
+  }
+}
+
+async function loadManualSeeds(args = {}) {
+  const explicit = cleanText(args['manual-seeds-file'])
+  const filePath = explicit || DEFAULT_MANUAL_SEEDS_FILE
+  try {
+    const rows = await readJsonl(path.resolve(process.cwd(), filePath))
+    return rows.map((row) => normalizeManualSeed(row)).filter(Boolean)
+  } catch {
+    return []
+  }
+}
+
+function mergeSeedsWithManual(discoveredSeeds = [], manualSeeds = []) {
+  const out = [...discoveredSeeds]
+  const seen = new Set(
+    discoveredSeeds.map((seed) => [
+      cleanText(seed.candidate_domains?.[0]),
+      cleanText(seed.vertical_l1).toLowerCase(),
+      cleanText(seed.vertical_l2).toLowerCase(),
+    ].join('|')),
+  )
+
+  for (const seed of manualSeeds) {
+    const key = [
+      cleanText(seed.candidate_domains?.[0]),
+      cleanText(seed.vertical_l1).toLowerCase(),
+      cleanText(seed.vertical_l2).toLowerCase(),
+    ].join('|')
+    if (!key || seen.has(key)) continue
+    seen.add(key)
+    out.push(seed)
+  }
+
+  return out
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2))
   const doFetch = toBoolean(args.fetch, true)
@@ -383,6 +452,11 @@ async function main() {
 
   const cleanResults = rawResultRows.filter((row) => row.domain && row.resolvedUrl)
   let brandSeeds = mergeToBrandSeeds(cleanResults)
+  const manualSeeds = await loadManualSeeds(args)
+  if (manualSeeds.length > 0) {
+    brandSeeds = mergeSeedsWithManual(brandSeeds, manualSeeds)
+    console.log(`[merge-search-results] merged ${manualSeeds.length} manual seeds`)
+  }
 
   if (enableMajesticFallback && brandSeeds.length < minSeeds) {
     const needed = minSeeds - brandSeeds.length
@@ -411,6 +485,7 @@ async function main() {
     sourceJobs: jobs.length,
     rawRecords: rawResultRows.length,
     mergedSeeds: brandSeeds.length,
+    manualSeeds: manualSeeds.length,
     minSeeds,
     enableMajesticFallback,
     output: path.relative(process.cwd(), seedsPath),
