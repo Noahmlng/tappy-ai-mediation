@@ -385,12 +385,14 @@ function shouldMarkSuspect(knowledgeAlignment, resolvedCanonical, sourceNameChec
 }
 
 async function probeDomain(domain, timeoutMs) {
-  if (!domain) return { reachable: false, protocol: '', url: '', title: '', siteSignals: {} }
+  if (!domain) return { reachable: false, protocol: '', url: '', title: '', siteSignals: {}, status_code: 0 }
   const candidates = [`https://${domain}`, `http://${domain}`]
   for (const url of candidates) {
     try {
       const response = await fetchWithTimeout(url, { timeoutMs })
-      if (!response.ok && response.status >= 500) continue
+      const statusCode = Number(response.status) || 0
+      if (statusCode >= 500) continue
+      if (statusCode >= 400 && ![401, 403].includes(statusCode)) continue
       const html = await response.text().catch(() => '')
       const title = extractHtmlTitle(html)
       const finalUrl = cleanText(response.url || '')
@@ -415,6 +417,7 @@ async function probeDomain(domain, timeoutMs) {
         url,
         title,
         siteSignals,
+        status_code: statusCode,
         final_url: finalUrl,
         final_domain: finalDomain,
         redirected,
@@ -430,6 +433,7 @@ async function probeDomain(domain, timeoutMs) {
     url: '',
     title: '',
     siteSignals: {},
+    status_code: 0,
     final_url: '',
     final_domain: '',
     redirected: false,
@@ -516,6 +520,7 @@ async function main() {
           url: `https://${domain}`,
           title: '',
           siteSignals: {},
+          status_code: 200,
           final_url: `https://${domain}`,
           final_domain: domain,
           redirected: false,

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
   parseArgs,
   toInteger,
@@ -16,6 +17,7 @@ import {
 const OFFERS_ROOT = path.resolve(process.cwd(), 'data/house-ads/offers')
 const OFFER_JOBS_DIR = path.join(OFFERS_ROOT, 'raw', 'offer-jobs')
 const OFFERS_CURATED_DIR = path.join(OFFERS_ROOT, 'curated')
+const __filename = fileURLToPath(import.meta.url)
 
 const VALID_AVAILABILITY = ['in_stock', 'limited', 'preorder', 'unknown']
 const TITLE_SUFFIX = ['Essential Pick', 'Top Rated', 'New Arrival', 'Limited Deal', 'Best Seller', 'Popular Choice']
@@ -147,10 +149,38 @@ function buildSnippet(brandName, keyword) {
   return cleanText(`${brandName} ${keyword || 'product'} option with strong category relevance and direct shopping intent.`).slice(0, 240)
 }
 
+function normalizeHttpUrl(value = '') {
+  const raw = cleanText(value)
+  if (!raw) return ''
+  try {
+    const parsed = new URL(raw)
+    if (!['http:', 'https:'].includes(parsed.protocol)) return ''
+    parsed.search = ''
+    parsed.hash = ''
+    return parsed.toString()
+  } catch {
+    return ''
+  }
+}
+
+function resolveSyntheticTargetUrl(job = {}) {
+  const canonical = normalizeHttpUrl(cleanText(job.canonical_landing_url))
+  if (canonical) return canonical
+  const domain = cleanText(job.official_domain).toLowerCase()
+  return domain ? `https://${domain}/` : ''
+}
+
+function buildSyntheticImageUrl(job = {}, index = 0) {
+  const domain = cleanText(job.official_domain).toLowerCase()
+  const brand = cleanText(job.brand_id).toLowerCase()
+  const seedBase = cleanText(domain || brand || `brand-${index + 1}`)
+  const seed = encodeURIComponent(`${seedBase}-${index + 1}`)
+  return `https://picsum.photos/seed/${seed}/640/360`
+}
+
 function buildSyntheticOffer(job, index, priceBand) {
   const brandId = cleanText(job.brand_id)
   const brandName = cleanText(job.brand_name) || brandId
-  const domain = cleanText(job.official_domain).toLowerCase()
   const market = cleanText(job.market) || 'US'
   const keywords = Array.isArray(job?.synthetic_hints?.keyword_seed) ? job.synthetic_hints.keyword_seed : []
   const keyword = cleanText(keywords[index % Math.max(1, keywords.length)] || job.vertical_l2 || 'product')
@@ -164,9 +194,8 @@ function buildSyntheticOffer(job, index, priceBand) {
   const discountPct = Number((((originalPrice - price) / originalPrice) * 100).toFixed(2))
 
   const availability = sampleByHash(`availability|${seed}`, VALID_AVAILABILITY) || 'in_stock'
-  const productSlug = slugify(`${keyword}-${index + 1}`)
-  const targetUrl = `https://${domain}/products/${productSlug || `item-${index + 1}`}`
-  const imageUrl = `https://${domain}/images/${productSlug || `item-${index + 1}`}.jpg`
+  const targetUrl = resolveSyntheticTargetUrl(job)
+  const imageUrl = buildSyntheticImageUrl(job, index)
   const cmpId = campaignId(job)
   const title = buildProductTitle(brandName, keyword, seed)
   const offerKey = `${cmpId}|${targetUrl}|${title}|${index}`
@@ -364,6 +393,8 @@ async function main() {
       : 0,
     rejectedCount: rejected.length,
     skippedBrandCount: skippedBrands.length,
+    targetUrlStrategy: 'canonical_landing_url',
+    imageUrlStrategy: 'picsum_seed_image',
     categoryDistribution: Object.fromEntries([...perCategory.entries()].sort((a, b) => b[1] - a[1])),
     output: path.relative(process.cwd(), outputPath),
   }
@@ -395,7 +426,15 @@ async function main() {
   )
 }
 
-main().catch((error) => {
-  console.error('[synthesize-offers] failed:', error?.message || error)
-  process.exit(1)
+if (path.resolve(process.argv[1] || '') === __filename) {
+  main().catch((error) => {
+    console.error('[synthesize-offers] failed:', error?.message || error)
+    process.exit(1)
+  })
+}
+
+export const __synthesizeOffersInternal = Object.freeze({
+  resolveSyntheticTargetUrl,
+  buildSyntheticImageUrl,
+  buildSyntheticOffer,
 })

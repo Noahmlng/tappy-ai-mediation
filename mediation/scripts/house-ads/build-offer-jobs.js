@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
   CURATED_ROOT,
   parseArgs,
@@ -11,6 +12,7 @@ import {
   ensureDir,
   cleanText,
   hashId,
+  normalizeUrl,
 } from './lib/common.js'
 import { VERTICAL_TAXONOMY } from './lib/vertical-taxonomy.js'
 
@@ -18,6 +20,7 @@ const OFFERS_ROOT = path.resolve(process.cwd(), 'data/house-ads/offers')
 const OFFER_JOBS_DIR = path.join(OFFERS_ROOT, 'raw', 'offer-jobs')
 const DEFAULT_BRANDS_FILE = path.join(CURATED_ROOT, 'brands.jsonl')
 const DEFAULT_LOCALE = 'en-US'
+const __filename = fileURLToPath(import.meta.url)
 
 function slugify(value) {
   return cleanText(value)
@@ -81,6 +84,34 @@ function buildCrawlTargets(domain, keywords = []) {
     `${base}/promotions`,
     ...keywordPaths.map((item) => `${base}${item}`),
   ])
+}
+
+function resolveCanonicalLandingUrl(brand = {}, domain = '') {
+  const evidence = brand?.evidence && typeof brand.evidence === 'object' ? brand.evidence : {}
+  const candidates = [
+    cleanText(evidence.homepage_url),
+    cleanText(evidence.redirect_final_url),
+    cleanText(brand.homepage_url),
+    cleanText(brand.canonical_url),
+    domain ? `https://${domain}` : '',
+  ]
+
+  for (const candidate of candidates) {
+    const normalized = normalizeUrl(candidate)
+    if (!normalized) continue
+    try {
+      const parsed = new URL(normalized)
+      if (!['http:', 'https:'].includes(parsed.protocol)) continue
+      parsed.pathname = '/'
+      parsed.search = ''
+      parsed.hash = ''
+      return parsed.toString()
+    } catch {
+      // ignore invalid candidate
+    }
+  }
+
+  return domain ? `https://${domain}/` : ''
 }
 
 function dedupeBrands(brands = []) {
@@ -158,6 +189,7 @@ function buildJobs(orderedRows, keywordByCategory) {
     const keywords = keywordByCategory.get(item.category_key) || []
     const priceBand = inferPriceBand(verticalL1, verticalL2)
     const crawlTargets = buildCrawlTargets(domain, keywords)
+    const canonicalLandingUrl = resolveCanonicalLandingUrl(brand, domain)
     const sourceConfidence = Number(brand.source_confidence || 0)
     const priorityTier = sourceConfidence >= 0.85 ? 'high' : sourceConfidence >= 0.72 ? 'medium' : 'normal'
     const jobId = `offer_job_${hashId(`${brand.brand_id}|${domain}|${index + 1}`, 12)}`
@@ -174,6 +206,7 @@ function buildJobs(orderedRows, keywordByCategory) {
       brand_id: cleanText(brand.brand_id),
       brand_name: cleanText(brand.brand_name),
       official_domain: domain,
+      canonical_landing_url: canonicalLandingUrl,
       vertical_l1: verticalL1,
       vertical_l2: verticalL2,
       market,
@@ -290,7 +323,13 @@ async function main() {
   )
 }
 
-main().catch((error) => {
-  console.error('[build-offer-jobs] failed:', error?.message || error)
-  process.exit(1)
+if (path.resolve(process.argv[1] || '') === __filename) {
+  main().catch((error) => {
+    console.error('[build-offer-jobs] failed:', error?.message || error)
+    process.exit(1)
+  })
+}
+
+export const __buildOfferJobsInternal = Object.freeze({
+  resolveCanonicalLandingUrl,
 })
