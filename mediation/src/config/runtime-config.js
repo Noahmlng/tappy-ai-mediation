@@ -164,9 +164,35 @@ export function loadRuntimeConfig(env = process.env, options = {}) {
         readEnv(env, 'MEDIATION_RETRIEVAL_FINAL_TOP_K', { required: false }),
         40,
       ),
+      bm25RefreshIntervalMs: toPositiveInteger(
+        readEnv(env, 'MEDIATION_BM25_REFRESH_INTERVAL_MS', { required: false }),
+        10 * 60 * 1000,
+      ),
       queryMode: parseRetrievalQueryMode(
         readEnv(env, 'MEDIATION_RETRIEVAL_QUERY_MODE', { required: false }),
       ),
+      sparseQueryMaxTokens: toPositiveInteger(
+        readEnv(env, 'MEDIATION_RETRIEVAL_SPARSE_QUERY_MAX_TOKENS', { required: false }),
+        24,
+      ),
+      assistantEntityMaxCount: toPositiveInteger(
+        readEnv(env, 'MEDIATION_RETRIEVAL_ASSISTANT_ENTITY_MAX_COUNT', { required: false }),
+        16,
+      ),
+      brandIntent: {
+        houseMissPenalty: toNumberInRange(
+          readEnv(env, 'MEDIATION_BRAND_INTENT_HOUSE_MISS_PENALTY', { required: false }),
+          0.08,
+          0,
+          1,
+        ),
+        houseShareCap: toNumberInRange(
+          readEnv(env, 'MEDIATION_BRAND_INTENT_HOUSE_SHARE_CAP', { required: false }),
+          0.6,
+          0,
+          1,
+        ),
+      },
       hybrid: {
         strategy: 'rrf_then_linear',
         sparseWeight: toNumberInRange(

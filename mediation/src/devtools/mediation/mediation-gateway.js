@@ -322,6 +322,15 @@ const RETRIEVAL_ENTITY_STOPWORDS = new Set([
   'assistant', 'user', 'please', 'thanks',
   '推荐', '比较', '对比', '价格', '优惠', '哪个好', '什么', '怎么', '可以', '帮我', '一下',
 ])
+const RETRIEVAL_ASSISTANT_ENTITY_STOPWORDS = new Set([
+  ...RETRIEVAL_ENTITY_STOPWORDS,
+  'fastest', 'popular', 'workflow', 'voice', 'dubbing', 'translation', 'translate', 'upload', 'video', 'videos',
+  'language', 'languages', 'quality', 'creator', 'creators', 'content', 'market', 'leader', 'free', 'trial', 'paid',
+  'option', 'options', 'step', 'steps', 'core', 'difference', 'gold', 'standard', 'model', 'models', 'all', 'one',
+  'platform', 'platforms', 'tool', 'tools', 'solution', 'solutions', 'app', 'apps',
+  'assistant',
+  '人工', '智能', '视频', '翻译', '配音', '工具', '平台', '方案',
+])
 const MANAGED_ROUTING_MODE = 'managed_mediation'
 const NEXT_STEP_INTENT_CARD_EVENTS = new Set(['followup_generation', 'follow_up_generation'])
 const POSTBACK_EVENT_TYPES = new Set(['postback'])
@@ -7609,20 +7618,72 @@ function extractRetrievalEntitiesFromTurns(recentTurns = [], options = {}) {
   return entities
 }
 
-function buildRetrievalQuery(primaryQuery = '', entities = []) {
+function isAssistantEntityToken(token = '') {
+  const normalized = String(token || '').trim().toLowerCase()
+  if (!normalized) return false
+  if (RETRIEVAL_ASSISTANT_ENTITY_STOPWORDS.has(normalized)) return false
+  if (/^\d+$/.test(normalized)) return false
+  if (normalized.length < 3 && !/[\u4e00-\u9fff]{2,}/.test(normalized)) return false
+  return true
+}
+
+function extractAssistantEntityTokens(recentTurns = [], options = {}) {
+  const maxCount = Math.max(1, toPositiveInteger(options.maxCount, 16))
+  const rows = Array.isArray(recentTurns) ? recentTurns : []
+  if (rows.length <= 0) return []
+
+  const dedupe = new Set()
+  const entities = []
+  const ordered = [...rows]
+    .filter((row) => row?.role === 'assistant')
+    .reverse()
+
+  for (const row of ordered) {
+    const content = String(row?.content || '')
+    if (!content) continue
+
+    const strongMatches = [...content.matchAll(/\*\*([^*]{2,80})\*\*/g)]
+    for (const match of strongMatches) {
+      const chunk = String(match?.[1] || '').trim()
+      if (!chunk) continue
+      const tokens = tokenizeRetrievalText(chunk)
+      for (const token of tokens) {
+        if (!isAssistantEntityToken(token)) continue
+        if (dedupe.has(token)) continue
+        dedupe.add(token)
+        entities.push(token)
+        if (entities.length >= maxCount) return entities
+      }
+    }
+
+    const camelCaseMatches = content.match(/\b[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+\b/g) || []
+    for (const raw of camelCaseMatches) {
+      const token = String(raw || '').trim().toLowerCase()
+      if (!isAssistantEntityToken(token)) continue
+      if (dedupe.has(token)) continue
+      dedupe.add(token)
+      entities.push(token)
+      if (entities.length >= maxCount) return entities
+    }
+  }
+
+  return entities
+}
+
+function buildRetrievalQuery(primaryQuery = '', entities = [], options = {}) {
   const query = clipText(primaryQuery, 1200)
   if (!query) return ''
   const queryTokenSet = new Set(tokenizeRetrievalText(query))
   const extraTokens = (Array.isArray(entities) ? entities : [])
     .map((item) => String(item || '').trim().toLowerCase())
     .filter((item) => item && !queryTokenSet.has(item))
-    .slice(0, 20)
+    .slice(0, Math.max(1, toPositiveInteger(options.maxEntityTokens, 20)))
 
   const merged = `${query} ${extraTokens.join(' ')}`.trim()
   return clipText(merged, 1200)
 }
 
-function deriveBidMessageContext(messages = []) {
+function deriveBidMessageContext(messages = [], options = {}) {
   const rows = Array.isArray(messages) ? messages : []
   const normalized = rows
     .map((row) => ({
@@ -7665,13 +7726,28 @@ function deriveBidMessageContext(messages = []) {
   const retrievalEntities = extractRetrievalEntitiesFromTurns(recentTurns, {
     maxCount: 12,
   })
-  const retrievalQuery = buildRetrievalQuery(latestUserQuery || query, retrievalEntities)
+  const assistantEntityTokens = extractAssistantEntityTokens(recentTurns, {
+    maxCount: Math.max(1, toPositiveInteger(options.assistantEntityMaxCount, 16)),
+  })
+  const semanticQuery = clipText(latestUserQuery || query, 1200)
+  const sparseQuery = buildRetrievalQuery(
+    semanticQuery,
+    [...assistantEntityTokens, ...retrievalEntities],
+    {
+      maxEntityTokens: Math.max(1, toPositiveInteger(options.sparseQueryMaxTokens, 24)),
+    },
+  )
+  const retrievalQuery = sparseQuery
   const localeHint = detectLocaleHintFromText(`${query} ${answerText}`)
   return {
     query: clipText(query, 1200),
     answerText: clipText(answerText, 1200),
     latestUserQuery: clipText(latestUserQuery || query, 1200),
+    semanticQuery,
+    sparseQuery,
     retrievalEntities,
+    assistantEntityTokens,
+    brandEntityTokens: assistantEntityTokens,
     retrievalQuery,
     recentTurns,
     localeHint,
@@ -7963,17 +8039,51 @@ async function evaluateSinglePlacementOpportunity({
     ? runtimeConfig.retrievalPolicy
     : {}
   const retrievalQueryMode = normalizeRetrievalQueryMode(retrievalPolicy.queryMode)
-  const retrievalQuery = retrievalQueryMode === 'recent_user_turns_concat'
+  const semanticRetrievalQuery = retrievalQueryMode === 'recent_user_turns_concat'
     ? String(messageContext.query || '').trim()
     : String(
-      messageContext.retrievalQuery
+      messageContext.semanticQuery
       || messageContext.latestUserQuery
       || messageContext.query
       || '',
     ).trim()
+  const sparseRetrievalQuery = retrievalQueryMode === 'recent_user_turns_concat'
+    ? String(messageContext.query || '').trim()
+    : String(
+      messageContext.sparseQuery
+      || messageContext.retrievalQuery
+      || messageContext.latestUserQuery
+      || messageContext.query
+      || '',
+    ).trim()
+  const brandEntityTokens = Array.isArray(messageContext.brandEntityTokens)
+    ? messageContext.brandEntityTokens
+    : []
+  const retrievalNetworks = deriveInventoryNetworksFromPlacement(placement, runtimeConfig)
+  const retrievalFilters = {
+    networks: retrievalNetworks,
+    market: 'US',
+    language: 'en-US',
+  }
+  const retrievalLanguageResolved = languageMatchMode === 'exact'
+    ? {
+        requested: 'en-US',
+        normalized: 'en-us',
+        base: 'en',
+        accepted: ['en-us'],
+      }
+    : {
+        requested: 'en-US',
+        normalized: 'en-us',
+        base: 'en',
+        accepted: ['en-us', 'en'],
+      }
   const lexicalTopK = toPositiveInteger(retrievalPolicy.lexicalTopK, 120)
   const vectorTopK = toPositiveInteger(retrievalPolicy.vectorTopK, 120)
   const finalTopK = toPositiveInteger(retrievalPolicy.finalTopK, 40)
+  const bm25RefreshIntervalMs = toPositiveInteger(retrievalPolicy.bm25RefreshIntervalMs, 10 * 60 * 1000)
+  const brandMissPenalty = clampNumber(retrievalPolicy?.brandIntent?.houseMissPenalty, 0, 1, 0.08)
+  const houseShareCap = clampNumber(retrievalPolicy?.brandIntent?.houseShareCap, 0, 1, 0.6)
   const hybridSparseWeight = clampNumber(retrievalPolicy?.hybrid?.sparseWeight, 0, 1, 0.65)
   const hybridDenseWeight = clampNumber(retrievalPolicy?.hybrid?.denseWeight, 0, 1, 0.35)
   const hybridStrategy = String(retrievalPolicy?.hybrid?.strategy || 'rrf_then_linear').trim() || 'rrf_then_linear'
@@ -8009,10 +8119,35 @@ async function evaluateSinglePlacementOpportunity({
   let upstreamFailure = intentUpstreamFailure
   let retrievalDebug = {
     lexicalHitCount: 0,
+    bm25HitCount: 0,
     vectorHitCount: 0,
     fusedHitCount: 0,
     queryMode: retrievalQueryMode,
-    queryUsed: retrievalQuery,
+    queryUsed: sparseRetrievalQuery,
+    semanticQuery: semanticRetrievalQuery,
+    sparseQuery: sparseRetrievalQuery,
+    filters: retrievalFilters,
+    languageMatchMode,
+    languageResolved: retrievalLanguageResolved,
+    scoring: {
+      strategy: hybridStrategy,
+      sparseWeight: hybridSparseWeight,
+      denseWeight: hybridDenseWeight,
+      sparseNormalization: 'min_max',
+      denseNormalization: 'cosine_shift',
+      rrfK: 60,
+    },
+    scoreStats: {
+      sparseMin: 0,
+      sparseMax: 0,
+      denseMin: 0,
+      denseMax: 0,
+    },
+    brandIntentDetected: false,
+    brandEntityTokens: [],
+    penaltiesApplied: [],
+    houseShareBeforeCap: 0,
+    houseShareAfterCap: 0,
   }
   let rankingDebug = {
     relevanceGate: {
@@ -8102,12 +8237,11 @@ async function evaluateSinglePlacementOpportunity({
       try {
         const retrievalStartedAt = Date.now()
         const retrieval = await retrieveOpportunityCandidates({
-          query: retrievalQuery,
-          filters: {
-            networks: deriveInventoryNetworksFromPlacement(placement, runtimeConfig),
-            market: 'US',
-            language: 'en-US',
-          },
+          query: sparseRetrievalQuery,
+          semanticQuery: semanticRetrievalQuery,
+          sparseQuery: sparseRetrievalQuery,
+          brandEntityTokens,
+          filters: retrievalFilters,
           queryMode: retrievalQueryMode,
           languageMatchMode,
           minLexicalScore,
@@ -8115,6 +8249,9 @@ async function evaluateSinglePlacementOpportunity({
           lexicalTopK,
           vectorTopK,
           finalTopK,
+          bm25RefreshIntervalMs,
+          brandMissPenalty,
+          houseShareCap,
           hybridStrategy,
           hybridSparseWeight,
           hybridDenseWeight,
@@ -8326,9 +8463,15 @@ async function evaluateV2BidOpportunityFirst(payload) {
     accountId: request.accountId,
     placementId: request.placementId,
   })
-  const messageContext = deriveBidMessageContext(request.messages)
-  const writer = createOpportunityChainWriter()
   const runtimeConfig = loadRuntimeConfig(process.env, { strict: false })
+  const retrievalPolicy = runtimeConfig?.retrievalPolicy && typeof runtimeConfig.retrievalPolicy === 'object'
+    ? runtimeConfig.retrievalPolicy
+    : {}
+  const messageContext = deriveBidMessageContext(request.messages, {
+    sparseQueryMaxTokens: toPositiveInteger(retrievalPolicy.sparseQueryMaxTokens, 24),
+    assistantEntityMaxCount: toPositiveInteger(retrievalPolicy.assistantEntityMaxCount, 16),
+  })
+  const writer = createOpportunityChainWriter()
 
   let precheckInventory = normalizeInventoryPrecheck()
   try {
@@ -8483,8 +8626,44 @@ async function evaluateV2BidOpportunityFirst(payload) {
     ? selectedPlacementResult.retrievalDebug
     : {
       lexicalHitCount: 0,
+      bm25HitCount: 0,
       vectorHitCount: 0,
       fusedHitCount: 0,
+      queryMode: normalizeRetrievalQueryMode(runtimeConfig?.retrievalPolicy?.queryMode),
+      queryUsed: '',
+      semanticQuery: '',
+      sparseQuery: '',
+      filters: {
+        networks: [],
+        market: '',
+        language: '',
+      },
+      languageMatchMode: String(runtimeConfig?.languagePolicy?.localeMatchMode || 'locale_or_base').trim() || 'locale_or_base',
+      languageResolved: {
+        requested: '',
+        normalized: '',
+        base: '',
+        accepted: [],
+      },
+      scoring: {
+        strategy: 'rrf_then_linear',
+        sparseWeight: clampNumber(runtimeConfig?.retrievalPolicy?.hybrid?.sparseWeight, 0, 1, 0.65),
+        denseWeight: clampNumber(runtimeConfig?.retrievalPolicy?.hybrid?.denseWeight, 0, 1, 0.35),
+        sparseNormalization: 'min_max',
+        denseNormalization: 'cosine_shift',
+        rrfK: 60,
+      },
+      scoreStats: {
+        sparseMin: 0,
+        sparseMax: 0,
+        denseMin: 0,
+        denseMax: 0,
+      },
+      brandIntentDetected: false,
+      brandEntityTokens: [],
+      penaltiesApplied: [],
+      houseShareBeforeCap: 0,
+      houseShareAfterCap: 0,
     }
   const rankingDebug = selectedPlacementResult?.rankingDebug && typeof selectedPlacementResult.rankingDebug === 'object'
     ? selectedPlacementResult.rankingDebug
@@ -8667,6 +8846,7 @@ async function evaluateV2BidOpportunityFirst(payload) {
         stage_delivery_ms: stageDurationsMs.delivery,
         retrieval_hit_count: toPositiveInteger(retrievalDebug?.fusedHitCount, 0),
         lexical_hit_count: toPositiveInteger(retrievalDebug?.lexicalHitCount, 0),
+        bm25_hit_count: toPositiveInteger(retrievalDebug?.bm25HitCount, 0),
         vector_hit_count: toPositiveInteger(retrievalDebug?.vectorHitCount, 0),
       },
     },

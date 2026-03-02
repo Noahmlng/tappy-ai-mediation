@@ -1,5 +1,6 @@
 import { buildQueryEmbedding, vectorToSqlLiteral } from './embedding.js'
 import { normalizeUnifiedOffers } from '../offers/index.js'
+import { queryBm25Candidates } from './bm25-index.js'
 
 const DEFAULT_LEXICAL_TOP_K = 120
 const DEFAULT_VECTOR_TOP_K = 120
@@ -12,6 +13,17 @@ const HOUSE_LOWINFO_TEMPLATE_PHRASE = 'option with strong category relevance and
 const DEFAULT_HYBRID_STRATEGY = 'rrf_then_linear'
 const DEFAULT_HYBRID_SPARSE_WEIGHT = 0.65
 const DEFAULT_HYBRID_DENSE_WEIGHT = 0.35
+const DEFAULT_BM25_REFRESH_INTERVAL_MS = 10 * 60 * 1000
+const DEFAULT_BRAND_MISS_PENALTY = 0.08
+const DEFAULT_HOUSE_SHARE_CAP = 0.6
+const BRAND_ENTITY_STOPWORDS = new Set([
+  'the', 'and', 'for', 'with', 'from', 'that', 'this', 'those', 'these', 'have', 'will', 'your', 'about', 'which',
+  'what', 'when', 'where', 'who', 'how', 'why', 'would', 'could', 'should', 'very', 'more', 'most',
+  'best', 'better', 'recommend', 'recommendation', 'recommendations', 'compare', 'comparison', 'price', 'prices',
+  'pricing', 'deal', 'deals', 'tool', 'tools', 'platform', 'platforms', 'software', 'service', 'services',
+  'please', 'thanks',
+  '推荐', '比较', '对比', '价格', '优惠', '什么', '怎么', '可以', '帮我', '一下',
+])
 
 function cleanText(value) {
   return String(value || '').trim().replace(/\s+/g, ' ')
@@ -173,8 +185,168 @@ function applyHouseLowInfoFilter(candidates = [], policy = {}) {
   }
 }
 
-function createQueryTextExpression(alias = 'n') {
-  return `to_tsvector('simple', coalesce(${alias}.title, '') || ' ' || coalesce(${alias}.description, '') || ' ' || coalesce(array_to_string(${alias}.tags, ' '), ''))`
+function compareHybridCandidates(a = {}, b = {}) {
+  if (b.fusedScore !== a.fusedScore) return b.fusedScore - a.fusedScore
+  if (b.sparseScoreNormalized !== a.sparseScoreNormalized) return b.sparseScoreNormalized - a.sparseScoreNormalized
+  if (b.denseScoreNormalized !== a.denseScoreNormalized) return b.denseScoreNormalized - a.denseScoreNormalized
+  if (b.rrfScore !== a.rrfScore) return b.rrfScore - a.rrfScore
+  if (b.vectorScore !== a.vectorScore) return b.vectorScore - a.vectorScore
+  if (b.lexicalScore !== a.lexicalScore) return b.lexicalScore - a.lexicalScore
+  return String(a.offerId || '').localeCompare(String(b.offerId || ''))
+}
+
+function normalizeBrandEntityToken(value = '') {
+  const normalized = cleanText(value).toLowerCase()
+  if (!normalized) return ''
+  if (BRAND_ENTITY_STOPWORDS.has(normalized)) return ''
+  if (/^\d+$/.test(normalized)) return ''
+  if (normalized.length < 3 && !/[\u4e00-\u9fff]{2,}/.test(normalized)) return ''
+  return normalized
+}
+
+function normalizeBrandEntityTokens(tokens = []) {
+  if (!Array.isArray(tokens)) return []
+  const dedupe = new Set()
+  const normalized = []
+  for (const token of tokens) {
+    const next = normalizeBrandEntityToken(token)
+    if (!next) continue
+    if (dedupe.has(next)) continue
+    dedupe.add(next)
+    normalized.push(next)
+  }
+  return normalized
+}
+
+function extractCandidateBrandTokens(candidate = {}) {
+  const metadata = candidate?.metadata && typeof candidate.metadata === 'object' ? candidate.metadata : {}
+  const tags = Array.isArray(candidate?.tags) ? candidate.tags : []
+  const corpus = [
+    candidate?.title,
+    candidate?.description,
+    metadata.brand,
+    metadata.brandName,
+    metadata.brand_name,
+    metadata.brandId,
+    metadata.brand_id,
+    metadata.merchant,
+    metadata.merchantName,
+    metadata.merchant_name,
+    ...tags,
+  ]
+    .map((item) => String(item || '').trim())
+    .filter(Boolean)
+    .join(' ')
+  return new Set(tokenize(corpus))
+}
+
+function computeHouseShare(candidates = [], finalTopK = DEFAULT_FINAL_TOP_K) {
+  const topSize = Math.max(1, toPositiveInteger(finalTopK, DEFAULT_FINAL_TOP_K))
+  const topCandidates = (Array.isArray(candidates) ? candidates : []).slice(0, topSize)
+  if (topCandidates.length <= 0) return 0
+  const houseCount = topCandidates.filter((item) => cleanText(item?.network).toLowerCase() === 'house').length
+  return round(houseCount / topSize)
+}
+
+function applyBrandIntentProtection(candidates = [], policy = {}) {
+  const list = Array.isArray(candidates) ? candidates : []
+  const finalTopK = toPositiveInteger(policy.finalTopK, DEFAULT_FINAL_TOP_K)
+  const brandEntityTokens = normalizeBrandEntityTokens(policy.brandEntityTokens)
+  const brandIntentDetected = brandEntityTokens.length > 0
+  const penaltyValue = clamp01(policy.brandMissPenalty, DEFAULT_BRAND_MISS_PENALTY)
+  const houseShareCap = clamp01(policy.houseShareCap, DEFAULT_HOUSE_SHARE_CAP)
+  const brandTokenSet = new Set(brandEntityTokens)
+  const penaltiesApplied = []
+
+  const withBrandHits = list.map((candidate) => {
+    const candidateBrandTokens = extractCandidateBrandTokens(candidate)
+    let brandEntityHitCount = 0
+    for (const token of brandTokenSet) {
+      if (candidateBrandTokens.has(token)) brandEntityHitCount += 1
+    }
+    return {
+      ...candidate,
+      brandEntityHitCount,
+      penaltyApplied: 0,
+      eliminationReason: String(candidate?.eliminationReason || '').trim(),
+    }
+  })
+
+  if (!brandIntentDetected) {
+    return {
+      candidates: [...withBrandHits].sort(compareHybridCandidates),
+      brandIntentDetected,
+      brandEntityTokens,
+      penaltiesApplied,
+      houseShareBeforeCap: computeHouseShare(withBrandHits, finalTopK),
+      houseShareAfterCap: computeHouseShare(withBrandHits, finalTopK),
+    }
+  }
+
+  const penalized = withBrandHits.map((candidate) => {
+    const network = cleanText(candidate?.network).toLowerCase()
+    if (network !== 'house' || candidate.brandEntityHitCount > 0) {
+      return candidate
+    }
+    const penaltyApplied = round(penaltyValue)
+    const nextFusedScore = round(Math.max(0, toFiniteNumber(candidate?.fusedScore, 0) - penaltyApplied))
+    penaltiesApplied.push({
+      offerId: cleanText(candidate?.offerId),
+      type: 'house_brand_miss_penalty',
+      amount: penaltyApplied,
+    })
+    return {
+      ...candidate,
+      penaltyApplied,
+      fusedScore: nextFusedScore,
+    }
+  })
+
+  const sorted = [...penalized].sort(compareHybridCandidates)
+  const houseShareBeforeCap = computeHouseShare(sorted, finalTopK)
+  const hasPartnerstackBrandHit = sorted.some((candidate) => (
+    cleanText(candidate?.network).toLowerCase() === 'partnerstack'
+    && toPositiveInteger(candidate?.brandEntityHitCount, 0) > 0
+  ))
+
+  if (!hasPartnerstackBrandHit) {
+    return {
+      candidates: sorted,
+      brandIntentDetected,
+      brandEntityTokens,
+      penaltiesApplied,
+      houseShareBeforeCap,
+      houseShareAfterCap: computeHouseShare(sorted, finalTopK),
+    }
+  }
+
+  const maxHouseInTopK = Math.max(0, Math.floor(Math.max(1, finalTopK) * houseShareCap))
+  let houseCount = 0
+  const kept = []
+  const deferredHouse = []
+
+  for (const candidate of sorted) {
+    const isHouse = cleanText(candidate?.network).toLowerCase() === 'house'
+    if (isHouse && houseCount >= maxHouseInTopK) {
+      deferredHouse.push({
+        ...candidate,
+        eliminationReason: candidate.eliminationReason || 'house_share_cap_demoted',
+      })
+      continue
+    }
+    if (isHouse) houseCount += 1
+    kept.push(candidate)
+  }
+
+  const reshuffled = [...kept]
+  return {
+    candidates: reshuffled,
+    brandIntentDetected,
+    brandEntityTokens,
+    penaltiesApplied,
+    houseShareBeforeCap,
+    houseShareAfterCap: computeHouseShare(reshuffled, finalTopK),
+  }
 }
 
 function tokenize(value = '') {
@@ -285,7 +457,7 @@ function createFallbackCandidatesFromOffers(offers = [], input = {}) {
   return candidates
 }
 
-async function fetchLexicalCandidates(pool, query, filters = {}, topK = DEFAULT_LEXICAL_TOP_K, policy = {}) {
+async function fetchBm25Candidates(pool, query, filters = {}, topK = DEFAULT_LEXICAL_TOP_K, policy = {}) {
   const trimmedQuery = cleanText(query)
   if (!trimmedQuery) return []
 
@@ -294,49 +466,20 @@ async function fetchLexicalCandidates(pool, query, filters = {}, topK = DEFAULT_
     normalizedFilters.language,
     normalizeLocaleMatchMode(policy.languageMatchMode),
   )
-  const sql = `
-    WITH q AS (
-      SELECT websearch_to_tsquery('simple', $1) AS tsq
-    )
-    SELECT
-      n.offer_id,
-      n.network,
-      n.upstream_offer_id,
-      n.title,
-      n.description,
-      n.target_url,
-      n.market,
-      n.language,
-      n.availability,
-      n.quality,
-      n.bid_hint,
-      n.policy_weight,
-      n.freshness_at,
-      n.tags,
-      n.metadata,
-      n.updated_at,
-      ts_rank_cd(${createQueryTextExpression('n')}, q.tsq) AS lexical_score
-    FROM offer_inventory_norm n
-    CROSS JOIN q
-    WHERE n.availability = 'active'
-      AND q.tsq <> ''::tsquery
-      AND ${createQueryTextExpression('n')} @@ q.tsq
-      AND ($2::text[] IS NULL OR n.network = ANY($2::text[]))
-      AND ($3::text IS NULL OR upper(n.market) = upper($3::text))
-      AND ($4::text[] IS NULL OR lower(n.language) = ANY($4::text[]))
-    ORDER BY lexical_score DESC, n.updated_at DESC
-      LIMIT $5
-  `
-
-  const result = await pool.query(sql, [
-    trimmedQuery,
-    normalizedFilters.networks.length > 0 ? normalizedFilters.networks : null,
-    normalizedFilters.market || null,
-    languageFilter.accepted.length > 0 ? languageFilter.accepted : null,
-    toPositiveInteger(topK, DEFAULT_LEXICAL_TOP_K),
-  ])
-
-  return Array.isArray(result.rows) ? result.rows : []
+  try {
+    return await queryBm25Candidates({
+      pool,
+      query: trimmedQuery,
+      filters: normalizedFilters,
+      acceptedLanguages: languageFilter.accepted,
+      topK: toPositiveInteger(topK, DEFAULT_LEXICAL_TOP_K),
+      refreshIntervalMs: toPositiveInteger(policy.bm25RefreshIntervalMs, DEFAULT_BM25_REFRESH_INTERVAL_MS),
+      k1: 1.2,
+      b: 0.75,
+    })
+  } catch {
+    return []
+  }
 }
 
 async function fetchVectorCandidates(pool, query, filters = {}, topK = DEFAULT_VECTOR_TOP_K, policy = {}) {
@@ -412,7 +555,8 @@ function mergeCandidate(base = {}, override = {}) {
       ? override.metadata
       : (base.metadata && typeof base.metadata === 'object' ? base.metadata : {}),
     updatedAt: cleanText(override.updated_at || base.updatedAt),
-    lexicalScore: toFiniteNumber(override.lexical_score ?? base.lexicalScore, 0),
+    lexicalScore: toFiniteNumber(override.lexical_score ?? override.bm25_raw ?? base.lexicalScore, 0),
+    bm25Raw: toFiniteNumber(override.bm25_raw ?? override.lexical_score ?? base.bm25Raw ?? base.lexicalScore, 0),
     vectorScore: toFiniteNumber(override.vector_score ?? base.vectorScore, 0),
     fusedScore: toFiniteNumber(override.fusedScore ?? base.fusedScore, 0),
     rrfScore: toFiniteNumber(override.rrfScore ?? base.rrfScore, 0),
@@ -505,7 +649,7 @@ function applyHybridLinearFusion(candidates = [], policy = {}) {
   let denseMax = Number.NEGATIVE_INFINITY
 
   for (const candidate of list) {
-    const sparseRaw = toFiniteNumber(candidate?.lexicalScore, 0)
+    const sparseRaw = toFiniteNumber(candidate?.bm25Raw ?? candidate?.lexicalScore, 0)
     const denseRaw = toFiniteNumber(candidate?.vectorScore, 0)
     sparseMin = Math.min(sparseMin, sparseRaw)
     sparseMax = Math.max(sparseMax, sparseRaw)
@@ -520,7 +664,7 @@ function applyHybridLinearFusion(candidates = [], policy = {}) {
 
   const sparseRange = sparseMax - sparseMin
   const scoredCandidates = list.map((candidate) => {
-    const sparseRaw = toFiniteNumber(candidate?.lexicalScore, 0)
+    const sparseRaw = toFiniteNumber(candidate?.bm25Raw ?? candidate?.lexicalScore, 0)
     const denseRaw = toFiniteNumber(candidate?.vectorScore, 0)
     const sparseScoreNormalized = sparseRange > 0
       ? clamp01((sparseRaw - sparseMin) / sparseRange, 0)
@@ -534,22 +678,17 @@ function applyHybridLinearFusion(candidates = [], policy = {}) {
 
     return {
       ...candidate,
+      bm25Raw: sparseRaw,
       sparseScoreNormalized,
       denseScoreNormalized,
       rrfScore,
       fusedScore,
+      penaltyApplied: toFiniteNumber(candidate?.penaltyApplied, 0),
+      eliminationReason: String(candidate?.eliminationReason || '').trim(),
     }
   })
 
-  scoredCandidates.sort((a, b) => {
-    if (b.fusedScore !== a.fusedScore) return b.fusedScore - a.fusedScore
-    if (b.sparseScoreNormalized !== a.sparseScoreNormalized) return b.sparseScoreNormalized - a.sparseScoreNormalized
-    if (b.denseScoreNormalized !== a.denseScoreNormalized) return b.denseScoreNormalized - a.denseScoreNormalized
-    if (b.rrfScore !== a.rrfScore) return b.rrfScore - a.rrfScore
-    if (b.vectorScore !== a.vectorScore) return b.vectorScore - a.vectorScore
-    if (b.lexicalScore !== a.lexicalScore) return b.lexicalScore - a.lexicalScore
-    return String(a.offerId || '').localeCompare(String(b.offerId || ''))
-  })
+  scoredCandidates.sort(compareHybridCandidates)
 
   return {
     candidates: scoredCandidates,
@@ -573,6 +712,9 @@ function normalizeHybridStrategy(value) {
 export async function retrieveOpportunityCandidates(input = {}, options = {}) {
   const startedAt = Date.now()
   const query = cleanText(input.query)
+  const semanticQuery = cleanText(input.semanticQuery || input.vectorQuery || query)
+  const sparseQuery = cleanText(input.sparseQuery || input.lexicalQuery || query || semanticQuery)
+  const queryForFallback = sparseQuery || semanticQuery || query
   const queryMode = cleanText(input.queryMode).toLowerCase() || 'raw_query'
   const filters = normalizeFilters(input.filters)
   const languageMatchMode = normalizeLocaleMatchMode(input.languageMatchMode)
@@ -594,6 +736,13 @@ export async function retrieveOpportunityCandidates(input = {}, options = {}) {
   const lexicalTopK = toPositiveInteger(input.lexicalTopK, DEFAULT_LEXICAL_TOP_K)
   const vectorTopK = toPositiveInteger(input.vectorTopK, DEFAULT_VECTOR_TOP_K)
   const finalTopK = toPositiveInteger(input.finalTopK, DEFAULT_FINAL_TOP_K)
+  const bm25RefreshIntervalMs = toPositiveInteger(
+    input.bm25RefreshIntervalMs,
+    DEFAULT_BM25_REFRESH_INTERVAL_MS,
+  )
+  const brandEntityTokens = normalizeBrandEntityTokens(input.brandEntityTokens)
+  const brandMissPenalty = clamp01(input.brandMissPenalty, DEFAULT_BRAND_MISS_PENALTY)
+  const houseShareCap = clamp01(input.houseShareCap, DEFAULT_HOUSE_SHARE_CAP)
   const emptyNetworkCounts = { partnerstack: 0, cj: 0, house: 0 }
   const emptyScoreStats = {
     sparseMin: 0,
@@ -611,21 +760,33 @@ export async function retrieveOpportunityCandidates(input = {}, options = {}) {
   }
   const baseDebug = {
     filters,
-    query,
+    query: semanticQuery,
     queryMode,
-    queryUsed: query,
+    queryUsed: sparseQuery || semanticQuery,
+    semanticQuery,
+    sparseQuery,
     languageMatchMode,
     languageResolved,
+    fusionWeights: {
+      sparse: hybridWeights.sparseWeight,
+      dense: hybridWeights.denseWeight,
+    },
     scoring: scoringDebug,
   }
   const buildDebug = (overrides = {}) => ({
     lexicalHitCount: 0,
+    bm25HitCount: 0,
     vectorHitCount: 0,
     fusedHitCount: 0,
     networkCandidateCountsBeforeFilter: emptyNetworkCounts,
     networkCandidateCountsAfterFilter: emptyNetworkCounts,
     houseLowInfoFilteredCount: 0,
     scoreStats: emptyScoreStats,
+    brandIntentDetected: false,
+    brandEntityTokens: [],
+    penaltiesApplied: [],
+    houseShareBeforeCap: 0,
+    houseShareAfterCap: 0,
     ...baseDebug,
     ...overrides,
     retrievalMs: Math.max(0, Date.now() - startedAt),
@@ -639,7 +800,9 @@ export async function retrieveOpportunityCandidates(input = {}, options = {}) {
     if (fallbackEnabled && fallbackProvider) {
       try {
         const fallbackResult = await fallbackProvider({
-          query,
+          query: semanticQuery || queryForFallback,
+          semanticQuery: semanticQuery || queryForFallback,
+          sparseQuery: sparseQuery || queryForFallback,
           filters,
           lexicalTopK,
           vectorTopK,
@@ -650,17 +813,23 @@ export async function retrieveOpportunityCandidates(input = {}, options = {}) {
           : createFallbackCandidatesFromOffers(
             Array.isArray(fallbackResult?.offers) ? fallbackResult.offers : [],
             {
-              query,
+              query: queryForFallback,
               filters,
               languageMatchMode,
             },
           )
         const hybridFallback = applyHybridLinearFusion(fallbackCandidates, hybridWeights)
-        const filtered = applyHouseLowInfoFilter(hybridFallback.candidates, {
+        const lowInfoFiltered = applyHouseLowInfoFilter(hybridFallback.candidates, {
           enabled: houseLowInfoFilterEnabled,
           minLexicalScore: houseLowInfoLexicalThreshold,
         })
-        const sliced = filtered.candidates.slice(0, finalTopK)
+        const brandProtected = applyBrandIntentProtection(lowInfoFiltered.candidates, {
+          brandEntityTokens,
+          brandMissPenalty,
+          houseShareCap,
+          finalTopK,
+        })
+        const sliced = brandProtected.candidates.slice(0, finalTopK)
         if (sliced.length > 0) {
           return {
             candidates: sliced,
@@ -668,14 +837,22 @@ export async function retrieveOpportunityCandidates(input = {}, options = {}) {
               lexicalHitCount: hybridFallback.candidates
                 .filter((item) => toFiniteNumber(item?.lexicalScore, 0) > 0)
                 .length,
+              bm25HitCount: hybridFallback.candidates
+                .filter((item) => toFiniteNumber(item?.bm25Raw ?? item?.lexicalScore, 0) > 0)
+                .length,
               vectorHitCount: hybridFallback.candidates
                 .filter((item) => toFiniteNumber(item?.vectorScore, 0) > 0)
                 .length,
               fusedHitCount: sliced.length,
-              networkCandidateCountsBeforeFilter: filtered.beforeCounts,
-              networkCandidateCountsAfterFilter: filtered.afterCounts,
-              houseLowInfoFilteredCount: filtered.filteredCount,
+              networkCandidateCountsBeforeFilter: lowInfoFiltered.beforeCounts,
+              networkCandidateCountsAfterFilter: lowInfoFiltered.afterCounts,
+              houseLowInfoFilteredCount: lowInfoFiltered.filteredCount,
               scoreStats: hybridFallback.stats,
+              brandIntentDetected: brandProtected.brandIntentDetected,
+              brandEntityTokens: brandProtected.brandEntityTokens,
+              penaltiesApplied: brandProtected.penaltiesApplied,
+              houseShareBeforeCap: brandProtected.houseShareBeforeCap,
+              houseShareAfterCap: brandProtected.houseShareAfterCap,
               mode: String(fallbackResult?.debug?.mode || 'connector_live_fallback'),
               fallbackMeta: fallbackResult?.debug && typeof fallbackResult.debug === 'object'
                 ? fallbackResult.debug
@@ -686,10 +863,15 @@ export async function retrieveOpportunityCandidates(input = {}, options = {}) {
         return {
           candidates: [],
           debug: buildDebug({
-            networkCandidateCountsBeforeFilter: filtered.beforeCounts,
-            networkCandidateCountsAfterFilter: filtered.afterCounts,
-            houseLowInfoFilteredCount: filtered.filteredCount,
+            networkCandidateCountsBeforeFilter: lowInfoFiltered.beforeCounts,
+            networkCandidateCountsAfterFilter: lowInfoFiltered.afterCounts,
+            houseLowInfoFilteredCount: lowInfoFiltered.filteredCount,
             scoreStats: hybridFallback.stats,
+            brandIntentDetected: brandProtected.brandIntentDetected,
+            brandEntityTokens: brandProtected.brandEntityTokens,
+            penaltiesApplied: brandProtected.penaltiesApplied,
+            houseShareBeforeCap: brandProtected.houseShareBeforeCap,
+            houseShareAfterCap: brandProtected.houseShareAfterCap,
             mode: String(fallbackResult?.debug?.mode || 'connector_live_fallback_empty'),
             fallbackMeta: fallbackResult?.debug && typeof fallbackResult.debug === 'object'
               ? fallbackResult.debug
@@ -715,10 +897,11 @@ export async function retrieveOpportunityCandidates(input = {}, options = {}) {
   }
 
   const [lexicalRows, vectorRows] = await Promise.all([
-    fetchLexicalCandidates(pool, query, filters, lexicalTopK, {
+    fetchBm25Candidates(pool, sparseQuery || queryForFallback, filters, lexicalTopK, {
       languageMatchMode,
+      bm25RefreshIntervalMs,
     }),
-    fetchVectorCandidates(pool, query, filters, vectorTopK, {
+    fetchVectorCandidates(pool, semanticQuery || queryForFallback, filters, vectorTopK, {
       languageMatchMode,
     }),
   ])
@@ -730,22 +913,34 @@ export async function retrieveOpportunityCandidates(input = {}, options = {}) {
     sparseWeight: hybridWeights.sparseWeight,
     denseWeight: hybridWeights.denseWeight,
   })
-  const filtered = applyHouseLowInfoFilter(hybrid.candidates, {
+  const lowInfoFiltered = applyHouseLowInfoFilter(hybrid.candidates, {
     enabled: houseLowInfoFilterEnabled,
     minLexicalScore: houseLowInfoLexicalThreshold,
   })
-  const sliced = filtered.candidates.slice(0, finalTopK)
+  const brandProtected = applyBrandIntentProtection(lowInfoFiltered.candidates, {
+    brandEntityTokens,
+    brandMissPenalty,
+    houseShareCap,
+    finalTopK,
+  })
+  const sliced = brandProtected.candidates.slice(0, finalTopK)
 
   return {
     candidates: sliced,
     debug: buildDebug({
       lexicalHitCount: lexicalRows.length,
+      bm25HitCount: lexicalRows.length,
       vectorHitCount: vectorRows.length,
       fusedHitCount: sliced.length,
-      networkCandidateCountsBeforeFilter: filtered.beforeCounts,
-      networkCandidateCountsAfterFilter: filtered.afterCounts,
-      houseLowInfoFilteredCount: filtered.filteredCount,
+      networkCandidateCountsBeforeFilter: lowInfoFiltered.beforeCounts,
+      networkCandidateCountsAfterFilter: lowInfoFiltered.afterCounts,
+      houseLowInfoFilteredCount: lowInfoFiltered.filteredCount,
       scoreStats: hybrid.stats,
+      brandIntentDetected: brandProtected.brandIntentDetected,
+      brandEntityTokens: brandProtected.brandEntityTokens,
+      penaltiesApplied: brandProtected.penaltiesApplied,
+      houseShareBeforeCap: brandProtected.houseShareBeforeCap,
+      houseShareAfterCap: brandProtected.houseShareAfterCap,
     }),
   }
 }

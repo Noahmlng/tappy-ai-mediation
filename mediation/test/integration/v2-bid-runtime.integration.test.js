@@ -53,6 +53,34 @@ function makeInventoryRow({
   }
 }
 
+function makeServingSnapshotRow({
+  offerId,
+  network,
+  title,
+  description,
+  targetUrl,
+  language = 'en-US',
+  tags = [],
+  metadata = {},
+}) {
+  return {
+    offer_id: offerId,
+    network,
+    title,
+    description,
+    target_url: targetUrl,
+    market: 'US',
+    language,
+    availability: 'active',
+    quality: 0.8,
+    bid_hint: 1.2,
+    policy_weight: 0.1,
+    tags,
+    metadata,
+    refreshed_at: '2026-02-26T00:00:00.000Z',
+  }
+}
+
 test('v2 bid runtime: picks highest priced bid as winner', async () => {
   const connectors = new Map([
     ['partnerstack', {
@@ -164,21 +192,19 @@ test('v2 bid runtime: tie breaks by policy weight then networkId', async () => {
 })
 
 test('v2 bid runtime: retrieval language policy locale_or_base keeps house en for en-US request', async () => {
-  const languageFilters = []
   const pool = {
-    async query(sql, params) {
-      languageFilters.push(params[3])
-      if (String(sql).includes('websearch_to_tsquery')) {
+    async query(sql) {
+      if (String(sql).includes('offer_inventory_serving_snapshot')) {
         return {
           rows: [
-            makeInventoryRow({
+            makeServingSnapshotRow({
               offerId: 'house:resource:001',
               network: 'house',
               title: 'Natural Resource Broker',
               description: 'Buy commodity and mining stocks on one platform.',
               targetUrl: 'https://house.example.com/resource',
               language: 'en',
-              lexicalScore: 0.21,
+              tags: ['broker', 'resource'],
             }),
           ],
         }
@@ -215,42 +241,56 @@ test('v2 bid runtime: retrieval language policy locale_or_base keeps house en fo
     pool,
   })
 
-  assert.deepEqual(languageFilters[0], ['en-us', 'en'])
-  assert.deepEqual(languageFilters[1], ['en-us', 'en'])
   assert.equal(result.debug.languageMatchMode, 'locale_or_base')
   assert.deepEqual(result.debug.languageResolved.accepted, ['en-us', 'en'])
+  assert.equal(result.debug.bm25HitCount > 0, true)
   assert.equal(result.debug.networkCandidateCountsBeforeFilter.house > 0, true)
+  assert.equal(
+    result.candidates.some((item) => item.offerId === 'house:resource:001'),
+    true,
+  )
 })
 
 test('v2 bid runtime: retrieval low-info house candidates are filtered before ranking', async () => {
   const pool = {
     async query(sql) {
-      if (String(sql).includes('websearch_to_tsquery')) {
+      if (String(sql).includes('offer_inventory_serving_snapshot')) {
         return {
           rows: [
-            makeInventoryRow({
-              offerId: 'house:synthetic:001',
-              network: 'house',
-              title: 'Generic Offer',
-              description: 'Option with strong category relevance and direct shopping intent.',
-              targetUrl: 'https://house.example.com/generic',
-              language: 'en',
-              tags: ['synthetic', 'finance'],
-              lexicalScore: 0.01,
-            }),
-            makeInventoryRow({
+            makeServingSnapshotRow({
               offerId: 'partnerstack:broker:001',
               network: 'partnerstack',
               title: 'Commodity Trading Platform',
               description: 'Compare broker plans and trading tools.',
               targetUrl: 'https://partner.example.com/broker',
               language: 'en-US',
-              lexicalScore: 0.09,
             }),
           ],
         }
       }
-      return { rows: [] }
+      return {
+        rows: [
+          makeInventoryRow({
+            offerId: 'house:synthetic:001',
+            network: 'house',
+            title: 'Generic Offer',
+            description: 'Option with strong category relevance and direct shopping intent.',
+            targetUrl: 'https://house.example.com/generic',
+            language: 'en',
+            tags: ['synthetic', 'finance'],
+            vectorScore: 0.88,
+          }),
+          makeInventoryRow({
+            offerId: 'partnerstack:broker:001',
+            network: 'partnerstack',
+            title: 'Commodity Trading Platform',
+            description: 'Compare broker plans and trading tools.',
+            targetUrl: 'https://partner.example.com/broker',
+            language: 'en-US',
+            vectorScore: 0.52,
+          }),
+        ],
+      }
     },
   }
 
@@ -280,26 +320,26 @@ test('v2 bid runtime: retrieval low-info house candidates are filtered before ra
 test('v2 bid runtime: retrieval hybrid fusion reranks by sparse+dense and keeps rrfScore', async () => {
   const pool = {
     async query(sql) {
-      if (String(sql).includes('websearch_to_tsquery')) {
+      if (String(sql).includes('offer_inventory_serving_snapshot')) {
         return {
           rows: [
-            makeInventoryRow({
+            makeServingSnapshotRow({
               offerId: 'partnerstack:brand:strong_lexical',
               network: 'partnerstack',
               title: 'Murf AI Voice Tools',
               description: 'AI voice generation for multilingual dubbing.',
               targetUrl: 'https://partner.example.com/murf',
-              lexicalScore: 0.9,
-              vectorScore: 0.2,
+              metadata: {
+                brand: 'Murf',
+                merchant: 'Murf',
+              },
             }),
-            makeInventoryRow({
+            makeServingSnapshotRow({
               offerId: 'partnerstack:generic:strong_dense',
               network: 'partnerstack',
               title: 'Generic Sales Platform',
               description: 'General business lead management software.',
               targetUrl: 'https://partner.example.com/generic',
-              lexicalScore: 0.1,
-              vectorScore: 0.95,
             }),
           ],
         }
@@ -351,12 +391,14 @@ test('v2 bid runtime: retrieval hybrid fusion reranks by sparse+dense and keeps 
   assert.equal(result.candidates[0].offerId, 'partnerstack:brand:strong_lexical')
   assert.equal(result.candidates[0].fusedScore > result.candidates[1].fusedScore, true)
   assert.equal(typeof result.candidates[0].rrfScore, 'number')
+  assert.equal(typeof result.candidates[0].bm25Raw, 'number')
   assert.equal(typeof result.debug?.scoring, 'object')
   assert.equal(result.debug?.scoring?.strategy, 'rrf_then_linear')
   assert.equal(result.debug?.scoring?.sparseWeight, 0.65)
   assert.equal(result.debug?.scoring?.denseWeight, 0.35)
   assert.equal(result.debug?.queryMode, 'latest_user_plus_entities')
   assert.equal(typeof result.debug?.queryUsed, 'string')
+  assert.equal(result.debug?.bm25HitCount > 0, true)
   assert.equal(typeof result.debug?.scoreStats?.sparseMin, 'number')
   assert.equal(typeof result.debug?.scoreStats?.sparseMax, 'number')
   assert.equal(typeof result.debug?.scoreStats?.denseMin, 'number')
@@ -366,8 +408,22 @@ test('v2 bid runtime: retrieval hybrid fusion reranks by sparse+dense and keeps 
 test('v2 bid runtime: retrieval hybrid normalizes invalid weights and returns score stats', async () => {
   const pool = {
     async query(sql) {
-      if (String(sql).includes('websearch_to_tsquery')) {
-        return { rows: [] }
+      if (String(sql).includes('offer_inventory_serving_snapshot')) {
+        return {
+          rows: [
+            makeServingSnapshotRow({
+              offerId: 'partnerstack:vector:001',
+              network: 'partnerstack',
+              title: 'ElevenLabs Voice AI',
+              description: 'Voice cloning and dubbing API.',
+              targetUrl: 'https://partner.example.com/elevenlabs',
+              metadata: {
+                brand: 'ElevenLabs',
+                merchant: 'ElevenLabs',
+              },
+            }),
+          ],
+        }
       }
       return {
         rows: [
@@ -406,6 +462,225 @@ test('v2 bid runtime: retrieval hybrid normalizes invalid weights and returns sc
   assert.equal(result.candidates.length, 1)
   assert.equal(result.debug?.scoring?.sparseWeight, 0.65)
   assert.equal(result.debug?.scoring?.denseWeight, 0.35)
-  assert.equal(result.debug?.scoreStats?.sparseMin, 0)
-  assert.equal(result.debug?.scoreStats?.sparseMax, 0)
+  assert.equal(result.debug?.scoreStats?.sparseMax >= result.debug?.scoreStats?.sparseMin, true)
+  assert.equal(typeof result.debug?.scoreStats?.sparseMin, 'number')
+  assert.equal(typeof result.debug?.scoreStats?.sparseMax, 'number')
+})
+
+test('v2 bid runtime: brand intent keeps Murf/ElevenLabs in pool and avoids unrelated house top1', async () => {
+  const pool = {
+    async query(sql) {
+      if (String(sql).includes('offer_inventory_serving_snapshot')) {
+        return {
+          rows: [
+            makeServingSnapshotRow({
+              offerId: 'house:product:ghostery',
+              network: 'house',
+              title: 'Ghostery developer tools Essential Pick',
+              description: 'General developer productivity suite.',
+              targetUrl: 'https://ghostery.example.com/tools',
+              metadata: {
+                brand: 'Ghostery',
+                merchant: 'Ghostery',
+              },
+            }),
+            makeServingSnapshotRow({
+              offerId: 'partnerstack:voice:murf',
+              network: 'partnerstack',
+              title: 'Murf AI Voice Dubbing',
+              description: 'Translate and dub creator videos with voice cloning.',
+              targetUrl: 'https://partner.example.com/murf',
+              metadata: {
+                brand: 'Murf',
+                merchant: 'Murf',
+              },
+            }),
+            makeServingSnapshotRow({
+              offerId: 'partnerstack:voice:elevenlabs',
+              network: 'partnerstack',
+              title: 'ElevenLabs Multilingual Dubbing',
+              description: 'Natural voice cloning for English dubbing.',
+              targetUrl: 'https://partner.example.com/elevenlabs',
+              metadata: {
+                brand: 'ElevenLabs',
+                merchant: 'ElevenLabs',
+              },
+            }),
+          ],
+        }
+      }
+      return {
+        rows: [
+          makeInventoryRow({
+            offerId: 'house:product:ghostery',
+            network: 'house',
+            title: 'Ghostery developer tools Essential Pick',
+            description: 'General developer productivity suite.',
+            targetUrl: 'https://ghostery.example.com/tools',
+            vectorScore: 0.93,
+          }),
+          makeInventoryRow({
+            offerId: 'partnerstack:voice:murf',
+            network: 'partnerstack',
+            title: 'Murf AI Voice Dubbing',
+            description: 'Translate and dub creator videos with voice cloning.',
+            targetUrl: 'https://partner.example.com/murf',
+            vectorScore: 0.67,
+          }),
+          makeInventoryRow({
+            offerId: 'partnerstack:voice:elevenlabs',
+            network: 'partnerstack',
+            title: 'ElevenLabs Multilingual Dubbing',
+            description: 'Natural voice cloning for English dubbing.',
+            targetUrl: 'https://partner.example.com/elevenlabs',
+            vectorScore: 0.65,
+          }),
+        ],
+      }
+    },
+  }
+
+  const result = await retrieveOpportunityCandidates({
+    query: 'recommend tools for Chinese to English YouTube dubbing',
+    semanticQuery: 'recommend tools for Chinese to English YouTube dubbing',
+    sparseQuery: 'recommend tools for Chinese to English YouTube dubbing murf elevenlabs',
+    brandEntityTokens: ['murf', 'elevenlabs'],
+    queryMode: 'latest_user_plus_entities',
+    filters: {
+      networks: ['partnerstack', 'house'],
+      market: 'US',
+      language: 'en-US',
+    },
+    lexicalTopK: 20,
+    vectorTopK: 20,
+    finalTopK: 10,
+  }, {
+    pool,
+  })
+
+  assert.equal(result.debug?.brandIntentDetected, true)
+  assert.equal(result.debug?.bm25HitCount > 0, true)
+  assert.equal(result.debug?.penaltiesApplied?.length > 0, true)
+  assert.equal(result.candidates.some((item) => item.offerId === 'partnerstack:voice:murf'), true)
+  assert.equal(result.candidates.some((item) => item.offerId === 'partnerstack:voice:elevenlabs'), true)
+  assert.notEqual(result.candidates[0].offerId, 'house:product:ghostery')
+})
+
+test('v2 bid runtime: brand intent cap limits house share when partner brand hit exists', async () => {
+  const pool = {
+    async query(sql) {
+      if (String(sql).includes('offer_inventory_serving_snapshot')) {
+        return {
+          rows: [
+            makeServingSnapshotRow({
+              offerId: 'house:offer:1',
+              network: 'house',
+              title: 'Generic House Tool 1',
+              description: 'General purpose tool',
+              targetUrl: 'https://house.example.com/1',
+            }),
+            makeServingSnapshotRow({
+              offerId: 'house:offer:2',
+              network: 'house',
+              title: 'Generic House Tool 2',
+              description: 'General purpose tool',
+              targetUrl: 'https://house.example.com/2',
+            }),
+            makeServingSnapshotRow({
+              offerId: 'house:offer:3',
+              network: 'house',
+              title: 'Generic House Tool 3',
+              description: 'General purpose tool',
+              targetUrl: 'https://house.example.com/3',
+            }),
+            makeServingSnapshotRow({
+              offerId: 'house:offer:4',
+              network: 'house',
+              title: 'Generic House Tool 4',
+              description: 'General purpose tool',
+              targetUrl: 'https://house.example.com/4',
+            }),
+            makeServingSnapshotRow({
+              offerId: 'partnerstack:voice:elevenlabs',
+              network: 'partnerstack',
+              title: 'ElevenLabs Voice Dubbing',
+              description: 'Voice cloning for creators.',
+              targetUrl: 'https://partner.example.com/elevenlabs',
+              metadata: {
+                brand: 'ElevenLabs',
+                merchant: 'ElevenLabs',
+              },
+            }),
+          ],
+        }
+      }
+      return {
+        rows: [
+          makeInventoryRow({
+            offerId: 'house:offer:1',
+            network: 'house',
+            title: 'Generic House Tool 1',
+            description: 'General purpose tool',
+            targetUrl: 'https://house.example.com/1',
+            vectorScore: 0.95,
+          }),
+          makeInventoryRow({
+            offerId: 'house:offer:2',
+            network: 'house',
+            title: 'Generic House Tool 2',
+            description: 'General purpose tool',
+            targetUrl: 'https://house.example.com/2',
+            vectorScore: 0.94,
+          }),
+          makeInventoryRow({
+            offerId: 'house:offer:3',
+            network: 'house',
+            title: 'Generic House Tool 3',
+            description: 'General purpose tool',
+            targetUrl: 'https://house.example.com/3',
+            vectorScore: 0.93,
+          }),
+          makeInventoryRow({
+            offerId: 'house:offer:4',
+            network: 'house',
+            title: 'Generic House Tool 4',
+            description: 'General purpose tool',
+            targetUrl: 'https://house.example.com/4',
+            vectorScore: 0.92,
+          }),
+          makeInventoryRow({
+            offerId: 'partnerstack:voice:elevenlabs',
+            network: 'partnerstack',
+            title: 'ElevenLabs Voice Dubbing',
+            description: 'Voice cloning for creators.',
+            targetUrl: 'https://partner.example.com/elevenlabs',
+            vectorScore: 0.4,
+          }),
+        ],
+      }
+    },
+  }
+
+  const result = await retrieveOpportunityCandidates({
+    query: 'voice dubbing recommendation',
+    semanticQuery: 'voice dubbing recommendation',
+    sparseQuery: 'voice dubbing recommendation elevenlabs',
+    brandEntityTokens: ['elevenlabs'],
+    queryMode: 'latest_user_plus_entities',
+    filters: {
+      networks: ['partnerstack', 'house'],
+      market: 'US',
+      language: 'en-US',
+    },
+    lexicalTopK: 50,
+    vectorTopK: 50,
+    finalTopK: 5,
+  }, {
+    pool,
+  })
+
+  const houseCount = result.candidates.filter((item) => String(item.network).toLowerCase() === 'house').length
+  assert.equal(result.debug?.brandIntentDetected, true)
+  assert.equal(result.debug?.houseShareAfterCap <= 0.6, true)
+  assert.equal(houseCount <= 3, true)
 })
