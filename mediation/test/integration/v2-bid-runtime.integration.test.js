@@ -4,6 +4,7 @@ import test from 'node:test'
 import { resetBm25IndexCache } from '../../src/runtime/bm25-index.js'
 import { runBidAggregationPipeline } from '../../src/runtime/index.js'
 import { retrieveOpportunityCandidates } from '../../src/runtime/opportunity-retrieval.js'
+import { rankOpportunityCandidates } from '../../src/runtime/opportunity-ranking.js'
 
 function makeOffer({ network, offerId, price, quality = 0 }) {
   return {
@@ -522,8 +523,8 @@ test('v2 bid runtime: retrieval hybrid normalizes invalid weights and returns sc
   })
 
   assert.equal(result.candidates.length, 1)
-  assert.equal(result.debug?.scoring?.sparseWeight, 0.65)
-  assert.equal(result.debug?.scoring?.denseWeight, 0.35)
+  assert.equal(result.debug?.scoring?.sparseWeight, 0.8)
+  assert.equal(result.debug?.scoring?.denseWeight, 0.2)
   assert.equal(result.debug?.scoreStats?.sparseMax >= result.debug?.scoreStats?.sparseMin, true)
   assert.equal(typeof result.debug?.scoreStats?.sparseMin, 'number')
   assert.equal(typeof result.debug?.scoreStats?.sparseMax, 'number')
@@ -817,7 +818,7 @@ test('v2 bid runtime: brand token match handles spaced names like Eleven Labs', 
   assert.equal(result.candidates.some((item) => item.offerId === 'house:offer:ghost'), true)
 })
 
-test('v2 bid runtime: brand intent with zero brand hits blocks off-topic fill', async () => {
+test('v2 bid runtime: brand intent with zero brand hits keeps candidates but applies penalties', async () => {
   const pool = {
     async query(sql) {
       if (String(sql).includes('offer_inventory_serving_snapshot')) {
@@ -886,8 +887,105 @@ test('v2 bid runtime: brand intent with zero brand hits blocks off-topic fill', 
   })
 
   assert.equal(result.debug?.brandIntentDetected, true)
-  assert.equal(result.debug?.brandIntentBlockedNoHit, true)
-  assert.equal(result.candidates.length, 0)
+  assert.equal(result.debug?.brandIntentBlockedNoHit, false)
+  assert.equal(result.debug?.penaltiesApplied?.length > 0, true)
+  assert.equal(result.candidates.length > 0, true)
+})
+
+test('v2 bid runtime: ranking single composite gate allows low vector candidate when gateScore passes', async () => {
+  const result = rankOpportunityCandidates({
+    candidates: [
+      {
+        offerId: 'partnerstack:voice:murf',
+        network: 'partnerstack',
+        title: 'Murf AI Voice Dubbing',
+        description: 'Translate and dub creator videos with voice cloning.',
+        targetUrl: 'https://partner.example.com/murf',
+        availability: 'active',
+        quality: 0.8,
+        bidHint: 1.2,
+        policyWeight: 0.1,
+        freshnessAt: '2026-02-26T00:00:00.000Z',
+        lexicalScore: 0,
+        vectorScore: 0.03,
+        fusedScore: 0.64,
+        topicCoverageScore: 0.08,
+        metadata: {
+          brand: 'Murf',
+          merchant: 'Murf',
+        },
+      },
+    ],
+    query: 'tools for chinese to english youtube dubbing',
+    answerText: 'Murf is one option for creator dubbing workflows.',
+    intentClass: 'product_exploration',
+    intentScore: 0.92,
+    blockedTopics: [],
+    scoreFloor: 0.2,
+    placementId: 'chat_intent_recommendation_v1',
+    triggerType: 'intent_recommendation',
+    placement: 'block',
+    topicCoverageGateEnabled: true,
+    topicCoverageThreshold: 0.05,
+    compositeGateStrict: 0.44,
+    compositeGateRelaxed: 0.36,
+    relevancePolicyV2: {
+      enabled: true,
+      mode: 'enforce',
+      sameVerticalFallbackEnabled: true,
+    },
+  })
+
+  assert.equal(result.reasonCode, 'served')
+  assert.equal(result.winner?.offerId, 'partnerstack:voice:murf')
+  assert.equal(result.debug?.gateStrategy, 'composite_single_gate')
+  assert.equal(typeof result.debug?.candidates?.[0]?.gateScore, 'number')
+  assert.equal(result.debug?.candidates?.[0]?.gateScore >= 0.44, true)
+})
+
+test('v2 bid runtime: ranking applies topic coverage hard threshold before composite gate', async () => {
+  const result = rankOpportunityCandidates({
+    candidates: [
+      {
+        offerId: 'partnerstack:voice:generic',
+        network: 'partnerstack',
+        title: 'Generic AI Product',
+        description: 'General software platform.',
+        targetUrl: 'https://partner.example.com/generic',
+        availability: 'active',
+        quality: 0.8,
+        bidHint: 1.2,
+        policyWeight: 0.1,
+        freshnessAt: '2026-02-26T00:00:00.000Z',
+        lexicalScore: 0.2,
+        vectorScore: 0.75,
+        fusedScore: 0.71,
+        topicCoverageScore: 0.03,
+      },
+    ],
+    query: 'tools for chinese to english youtube dubbing',
+    answerText: 'recommendations for dubbing',
+    intentClass: 'product_exploration',
+    intentScore: 0.92,
+    blockedTopics: [],
+    scoreFloor: 0.2,
+    placementId: 'chat_intent_recommendation_v1',
+    triggerType: 'intent_recommendation',
+    placement: 'block',
+    topicCoverageGateEnabled: true,
+    topicCoverageThreshold: 0.05,
+    compositeGateStrict: 0.44,
+    compositeGateRelaxed: 0.36,
+    relevancePolicyV2: {
+      enabled: true,
+      mode: 'enforce',
+      sameVerticalFallbackEnabled: true,
+    },
+  })
+
+  assert.equal(result.reasonCode, 'inventory_no_match')
+  assert.equal(result.debug?.topicCoverageFilteredCount > 0, true)
+  assert.equal(result.debug?.gateStrategy, 'composite_single_gate')
 })
 
 test('v2 bid runtime: retrieval debug exposes latest-turn context and topic coverage scores', async () => {

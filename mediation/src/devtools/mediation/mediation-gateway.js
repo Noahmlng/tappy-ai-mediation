@@ -8195,11 +8195,23 @@ async function evaluateSinglePlacementOpportunity({
   const bm25RefreshIntervalMs = toPositiveInteger(retrievalPolicy.bm25RefreshIntervalMs, 10 * 60 * 1000)
   const brandMissPenalty = clampNumber(retrievalPolicy?.brandIntent?.houseMissPenalty, 0, 1, 0.08)
   const houseShareCap = clampNumber(retrievalPolicy?.brandIntent?.houseShareCap, 0, 1, 0.6)
-  const hybridSparseWeight = clampNumber(retrievalPolicy?.hybrid?.sparseWeight, 0, 1, 0.65)
-  const hybridDenseWeight = clampNumber(retrievalPolicy?.hybrid?.denseWeight, 0, 1, 0.35)
+  const hybridSparseWeight = clampNumber(retrievalPolicy?.hybrid?.sparseWeight, 0, 1, 0.8)
+  const hybridDenseWeight = clampNumber(retrievalPolicy?.hybrid?.denseWeight, 0, 1, 0.2)
   const hybridStrategy = String(retrievalPolicy?.hybrid?.strategy || 'rrf_then_linear').trim() || 'rrf_then_linear'
   const configuredMinLexicalScore = clampNumber(runtimeConfig?.relevancePolicy?.minLexicalScore, 0, 1, 0.02)
   const configuredMinVectorScore = clampNumber(runtimeConfig?.relevancePolicy?.minVectorScore, 0, 1, 0.14)
+  const configuredTopicCoverageThreshold = clampNumber(
+    runtimeConfig?.relevancePolicy?.topicCoverageThreshold,
+    0,
+    1,
+    0.05,
+  )
+  const compositeGateStrict = clampNumber(runtimeConfig?.relevancePolicy?.compositeGateStrict, 0, 1, 0.44)
+  const compositeGateRelaxedRaw = clampNumber(runtimeConfig?.relevancePolicy?.compositeGateRelaxed, 0, 1, 0.36)
+  const compositeGateRelaxed = Math.min(compositeGateStrict, compositeGateRelaxedRaw)
+  const compositeGateThresholdVersion = String(
+    runtimeConfig?.relevancePolicy?.compositeGateThresholdVersion || 'composite_single_gate_v1',
+  ).trim() || 'composite_single_gate_v1'
   const minLexicalScore = Math.max(configuredMinLexicalScore, 0.02)
   const minVectorScore = Math.max(configuredMinVectorScore, 0.14)
   const thresholdFloorsApplied = {
@@ -8295,6 +8307,15 @@ async function evaluateSinglePlacementOpportunity({
       triggered: false,
     },
     relevanceFilteredCount: 0,
+    gateStrategy: 'composite_single_gate',
+    gateWeights: { fused: 0.55, relevance: 0.35, topic: 0.1 },
+    thresholdsApplied: {
+      topicCoverage: configuredTopicCoverageThreshold,
+      strict: compositeGateStrict,
+      relaxed: compositeGateRelaxed,
+      thresholdVersion: compositeGateThresholdVersion,
+    },
+    candidates: [],
     thresholdFloorsApplied,
   }
   let gatePassed = false
@@ -8440,7 +8461,13 @@ async function evaluateSinglePlacementOpportunity({
           minLexicalScore,
           minVectorScore,
           topicCoverageGateEnabled: placementId === PLACEMENT_ID_INTENT_RECOMMENDATION,
-          topicCoverageThreshold: 0.1,
+          topicCoverageThreshold: configuredTopicCoverageThreshold,
+          compositeGateStrict,
+          compositeGateRelaxed,
+          compositeGateThresholdVersion,
+          compositeGateFusedWeight: 0.55,
+          compositeGateRelevanceWeight: 0.35,
+          compositeGateTopicWeight: 0.1,
           placementId,
           triggerType,
           placement: 'block',
@@ -8821,8 +8848,8 @@ async function evaluateV2BidOpportunityFirst(payload) {
       },
       scoring: {
         strategy: 'rrf_then_linear',
-        sparseWeight: clampNumber(runtimeConfig?.retrievalPolicy?.hybrid?.sparseWeight, 0, 1, 0.65),
-        denseWeight: clampNumber(runtimeConfig?.retrievalPolicy?.hybrid?.denseWeight, 0, 1, 0.35),
+        sparseWeight: clampNumber(runtimeConfig?.retrievalPolicy?.hybrid?.sparseWeight, 0, 1, 0.8),
+        denseWeight: clampNumber(runtimeConfig?.retrievalPolicy?.hybrid?.denseWeight, 0, 1, 0.2),
         sparseNormalization: 'min_max',
         denseNormalization: 'cosine_shift',
         rrfK: 60,
@@ -8844,6 +8871,19 @@ async function evaluateV2BidOpportunityFirst(payload) {
   const rankingDebug = selectedPlacementResult?.rankingDebug && typeof selectedPlacementResult.rankingDebug === 'object'
     ? selectedPlacementResult.rankingDebug
     : {
+      gateStrategy: 'composite_single_gate',
+      gateWeights: { fused: 0.55, relevance: 0.35, topic: 0.1 },
+      thresholdsApplied: {
+        topicCoverage: clampNumber(runtimeConfig?.relevancePolicy?.topicCoverageThreshold, 0, 1, 0.05),
+        strict: clampNumber(runtimeConfig?.relevancePolicy?.compositeGateStrict, 0, 1, 0.44),
+        relaxed: Math.min(
+          clampNumber(runtimeConfig?.relevancePolicy?.compositeGateStrict, 0, 1, 0.44),
+          clampNumber(runtimeConfig?.relevancePolicy?.compositeGateRelaxed, 0, 1, 0.36),
+        ),
+        thresholdVersion: String(runtimeConfig?.relevancePolicy?.compositeGateThresholdVersion || 'composite_single_gate_v1')
+          .trim() || 'composite_single_gate_v1',
+      },
+      candidates: [],
       thresholdFloorsApplied: {
         minLexicalScore: {
           configured: clampNumber(runtimeConfig?.relevancePolicy?.minLexicalScore, 0, 1, 0.02),

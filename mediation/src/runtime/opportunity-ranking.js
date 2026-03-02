@@ -13,7 +13,15 @@ const DEFAULT_SCORE_FLOOR = 0.32
 const DEFAULT_INTENT_MIN_LEXICAL_SCORE = 0.02
 const DEFAULT_INTENT_MIN_VECTOR_SCORE = 0.14
 const DEFAULT_INTENT_MIN_VECTOR_SCORE_FLOOR = 0.14
-const DEFAULT_TOPIC_COVERAGE_THRESHOLD = 0.1
+const DEFAULT_TOPIC_COVERAGE_THRESHOLD = 0.05
+const DEFAULT_COMPOSITE_GATE_STRICT = 0.44
+const DEFAULT_COMPOSITE_GATE_RELAXED = 0.36
+const DEFAULT_COMPOSITE_GATE_THRESHOLD_VERSION = 'composite_single_gate_v1'
+const DEFAULT_COMPOSITE_GATE_WEIGHTS = Object.freeze({
+  fused: 0.55,
+  relevance: 0.35,
+  topic: 0.1,
+})
 const RELEVANCE_GATED_PLACEMENTS = new Set(['chat_intent_recommendation_v1', 'chat_from_answer_v1'])
 const RELEVANCE_POLICY_MODES = new Set(['observe', 'shadow', 'enforce'])
 
@@ -53,6 +61,97 @@ function normalizeRelevancePolicyMode(value, fallback = 'enforce') {
 function shouldApplyRelevanceGate(placementId = '', relevancePolicy = {}) {
   if (relevancePolicy?.enabled === false) return false
   return RELEVANCE_GATED_PLACEMENTS.has(cleanText(placementId))
+}
+
+function normalizeCompositeGateWeights(input = {}) {
+  const fusedRaw = toFiniteNumber(input.fusedWeight, Number.NaN)
+  const relevanceRaw = toFiniteNumber(input.relevanceWeight, Number.NaN)
+  const topicRaw = toFiniteNumber(input.topicWeight, Number.NaN)
+
+  let fused = Number.isFinite(fusedRaw) && fusedRaw >= 0
+    ? fusedRaw
+    : DEFAULT_COMPOSITE_GATE_WEIGHTS.fused
+  let relevance = Number.isFinite(relevanceRaw) && relevanceRaw >= 0
+    ? relevanceRaw
+    : DEFAULT_COMPOSITE_GATE_WEIGHTS.relevance
+  let topic = Number.isFinite(topicRaw) && topicRaw >= 0
+    ? topicRaw
+    : DEFAULT_COMPOSITE_GATE_WEIGHTS.topic
+
+  if ((fused + relevance + topic) <= 0) {
+    fused = DEFAULT_COMPOSITE_GATE_WEIGHTS.fused
+    relevance = DEFAULT_COMPOSITE_GATE_WEIGHTS.relevance
+    topic = DEFAULT_COMPOSITE_GATE_WEIGHTS.topic
+  }
+
+  const total = fused + relevance + topic
+  if (!Number.isFinite(total) || total <= 0) {
+    return { ...DEFAULT_COMPOSITE_GATE_WEIGHTS }
+  }
+  return {
+    fused: Number((fused / total).toFixed(6)),
+    relevance: Number((relevance / total).toFixed(6)),
+    topic: Number((topic / total).toFixed(6)),
+  }
+}
+
+function computeCompositeGateScore(candidate = {}, weights = DEFAULT_COMPOSITE_GATE_WEIGHTS) {
+  const fusedScore = clamp01(toFiniteNumber(candidate?.fusedScore, 0))
+  const relevanceScore = clamp01(toFiniteNumber(candidate?.relevanceScore, 0))
+  const topicCoverageScore = clamp01(toFiniteNumber(candidate?.topicCoverageScore, 0))
+  const gateScore = Number((
+    fusedScore * weights.fused
+    + relevanceScore * weights.relevance
+    + topicCoverageScore * weights.topic
+  ).toFixed(6))
+  return {
+    gateScore,
+    gateComponentScores: {
+      fused: fusedScore,
+      relevance: relevanceScore,
+      topic: topicCoverageScore,
+    },
+  }
+}
+
+function buildCompositeGateDebugCandidates(candidates = [], input = {}) {
+  const strictThreshold = clamp01(input.strictThreshold ?? DEFAULT_COMPOSITE_GATE_STRICT)
+  const relaxedThresholdRaw = clamp01(input.relaxedThreshold ?? DEFAULT_COMPOSITE_GATE_RELAXED)
+  const relaxedThreshold = Math.min(strictThreshold, relaxedThresholdRaw)
+  const topicCoverageThreshold = clamp01(input.topicCoverageThreshold ?? DEFAULT_TOPIC_COVERAGE_THRESHOLD)
+  const eligibleSet = input.eligibleSet instanceof Set ? input.eligibleSet : new Set()
+
+  return (Array.isArray(candidates) ? candidates : []).map((candidate) => {
+    const offerId = cleanText(candidate?.offerId)
+    const sameVerticalFamily = candidate?.relevanceVerticalDecision?.sameVerticalFamily === true
+    const gateScore = toFiniteNumber(candidate?.gateScore, 0)
+    const passesTopicCoverage = toFiniteNumber(candidate?.topicCoverageScore, 0) >= topicCoverageThreshold
+    const passesStrict = gateScore >= strictThreshold
+    const passesRelaxed = gateScore >= relaxedThreshold
+    return {
+      offerId,
+      network: cleanText(candidate?.network).toLowerCase(),
+      fusedScore: clamp01(candidate?.fusedScore),
+      relevanceScore: clamp01(candidate?.relevanceScore),
+      topicCoverageScore: clamp01(candidate?.topicCoverageScore),
+      lexicalScore: clamp01(candidate?.lexicalScore),
+      vectorScore: clamp01(candidate?.vectorScore),
+      gateScore,
+      gateComponentScores: candidate?.gateComponentScores && typeof candidate.gateComponentScores === 'object'
+        ? { ...candidate.gateComponentScores }
+        : {
+            fused: clamp01(candidate?.fusedScore),
+            relevance: clamp01(candidate?.relevanceScore),
+            topic: clamp01(candidate?.topicCoverageScore),
+          },
+      sameVerticalFamily,
+      passesTopicCoverage,
+      passesStrict,
+      passesRelaxed,
+      eligible: eligibleSet.has(offerId),
+      eliminationReason: cleanText(candidate?.eliminationReason),
+    }
+  })
 }
 
 function normalizeQuality(value) {
@@ -310,6 +409,23 @@ function chooseRelevanceEligibleCandidates(baseEligible = [], input = {}) {
   const mode = normalizeRelevancePolicyMode(relevancePolicy.mode, 'enforce')
   const thresholds = resolveThresholdsForPlacement(placementId, relevancePolicy)
   const sameVerticalFallbackEnabled = parseBoolean(relevancePolicy.sameVerticalFallbackEnabled, true)
+  const compositeGateWeights = normalizeCompositeGateWeights({
+    fusedWeight: input.compositeGateFusedWeight,
+    relevanceWeight: input.compositeGateRelevanceWeight,
+    topicWeight: input.compositeGateTopicWeight,
+  })
+  const compositeGateStrict = clamp01(
+    input.compositeGateStrict ?? DEFAULT_COMPOSITE_GATE_STRICT,
+    DEFAULT_COMPOSITE_GATE_STRICT,
+  )
+  const compositeGateRelaxedRaw = clamp01(
+    input.compositeGateRelaxed ?? DEFAULT_COMPOSITE_GATE_RELAXED,
+    DEFAULT_COMPOSITE_GATE_RELAXED,
+  )
+  const compositeGateRelaxed = Math.min(compositeGateStrict, compositeGateRelaxedRaw)
+  const compositeGateThresholdVersion = cleanText(
+    input.compositeGateThresholdVersion || DEFAULT_COMPOSITE_GATE_THRESHOLD_VERSION,
+  ) || DEFAULT_COMPOSITE_GATE_THRESHOLD_VERSION
 
   if (!applied || baseEligible.length <= 0) {
     return {
@@ -321,15 +437,24 @@ function chooseRelevanceEligibleCandidates(baseEligible = [], input = {}) {
       filteredCount: 0,
       shadowDecision: null,
       scoredCandidates: baseEligible,
+      gateStrategy: 'composite_single_gate',
+      gateWeights: compositeGateWeights,
+      compositeThresholdsApplied: {
+        strict: compositeGateStrict,
+        relaxed: compositeGateRelaxed,
+        thresholdVersion: compositeGateThresholdVersion,
+        mode,
+      },
+      scoredCandidatesDebug: [],
       gate: buildRelevanceGateSnapshot({
         applied,
         mode,
         placementId,
         minLexicalScore,
         minVectorScore,
-        strictThreshold: thresholds.strict,
-        relaxedThreshold: thresholds.relaxed,
-        thresholdVersion: thresholds.thresholdVersion,
+        strictThreshold: compositeGateStrict,
+        relaxedThreshold: compositeGateRelaxed,
+        thresholdVersion: compositeGateThresholdVersion,
         sameVerticalFallbackEnabled,
         baseEligibleCount: baseEligible.length,
         strictEligibleCount: baseEligible.length,
@@ -369,33 +494,32 @@ function chooseRelevanceEligibleCandidates(baseEligible = [], input = {}) {
   }
 
   const scoredCandidates = buildScoredRelevanceCandidates(baseEligible, input)
-  const lexicalVectorEligible = scoredCandidates.filter((candidate) => (
-    toFiniteNumber(candidate?.lexicalScore, 0) >= minLexicalScore
-    || toFiniteNumber(candidate?.vectorScore, 0) >= minVectorScore
-  ))
-  const preFilteredCount = Math.max(0, scoredCandidates.length - lexicalVectorEligible.length)
-  const strictEligible = lexicalVectorEligible
-    .filter((candidate) => candidate.relevanceScore >= thresholds.strict)
+    .map((candidate) => ({
+      ...candidate,
+      ...computeCompositeGateScore(candidate, compositeGateWeights),
+    }))
+  const strictEligible = scoredCandidates
+    .filter((candidate) => toFiniteNumber(candidate?.gateScore, 0) >= compositeGateStrict)
 
-  const firstVertical = lexicalVectorEligible[0]?.relevanceVerticalDecision
-    && typeof lexicalVectorEligible[0].relevanceVerticalDecision === 'object'
-    ? lexicalVectorEligible[0].relevanceVerticalDecision
+  const firstVertical = scoredCandidates[0]?.relevanceVerticalDecision
+    && typeof scoredCandidates[0].relevanceVerticalDecision === 'object'
+    ? scoredCandidates[0].relevanceVerticalDecision
     : {}
   const targetVertical = cleanText(firstVertical.targetVertical || firstVertical.queryVertical || 'general') || 'general'
 
   const relaxedPool = sameVerticalFallbackEnabled
-    ? lexicalVectorEligible.filter((candidate) => candidate?.relevanceVerticalDecision?.sameVerticalFamily === true)
+    ? scoredCandidates.filter((candidate) => candidate?.relevanceVerticalDecision?.sameVerticalFamily === true)
     : []
   const relaxedEligible = relaxedPool
-    .filter((candidate) => candidate.relevanceScore >= thresholds.relaxed)
+    .filter((candidate) => toFiniteNumber(candidate?.gateScore, 0) >= compositeGateRelaxed)
 
   let gateStage = 'strict'
   let blockedReason = ''
   let eligible = strictEligible
 
   const strictBlocked = strictEligible.length === 0
-  const hasCrossVerticalRelaxedHit = lexicalVectorEligible.some((candidate) => (
-    candidate.relevanceScore >= thresholds.relaxed
+  const hasCrossVerticalRelaxedHit = scoredCandidates.some((candidate) => (
+    toFiniteNumber(candidate?.gateScore, 0) >= compositeGateRelaxed
     && candidate?.relevanceVerticalDecision?.sameVerticalFamily !== true
   ))
 
@@ -417,8 +541,8 @@ function chooseRelevanceEligibleCandidates(baseEligible = [], input = {}) {
     blockedReason,
     strictEligibleCount: strictEligible.length,
     relaxedEligibleCount: relaxedEligible.length,
-    strictThreshold: thresholds.strict,
-    relaxedThreshold: thresholds.relaxed,
+    strictThreshold: compositeGateStrict,
+    relaxedThreshold: compositeGateRelaxed,
     targetVertical,
   }
   const enforceEligible = eligible
@@ -433,9 +557,20 @@ function chooseRelevanceEligibleCandidates(baseEligible = [], input = {}) {
     blockedReason = ''
   }
 
-  const enforceFilteredCount = Math.max(0, preFilteredCount + lexicalVectorEligible.length - enforceEligible.length)
+  const enforceFilteredCount = Math.max(0, scoredCandidates.length - enforceEligible.length)
   const filteredCount = mode === 'enforce' ? enforceFilteredCount : 0
   const winnerLike = eligible[0] || scoredCandidates[0] || null
+  const eligibleSet = new Set(
+    (Array.isArray(eligible) ? eligible : [])
+      .map((candidate) => cleanText(candidate?.offerId))
+      .filter(Boolean),
+  )
+  const scoredCandidatesDebug = buildCompositeGateDebugCandidates(scoredCandidates, {
+    strictThreshold: compositeGateStrict,
+    relaxedThreshold: compositeGateRelaxed,
+    topicCoverageThreshold: input.topicCoverageThreshold,
+    eligibleSet,
+  })
 
   return {
     eligible,
@@ -452,24 +587,33 @@ function chooseRelevanceEligibleCandidates(baseEligible = [], input = {}) {
       placementId,
       minLexicalScore,
       minVectorScore,
-      strictThreshold: thresholds.strict,
-      relaxedThreshold: thresholds.relaxed,
-      thresholdVersion: thresholds.thresholdVersion,
-        sameVerticalFallbackEnabled,
-        baseEligibleCount: baseEligible.length,
-        strictEligibleCount: strictEligible.length,
-        relaxedEligibleCount: relaxedEligible.length,
-        filteredCount: mode === 'enforce' ? filteredCount : enforceFilteredCount,
-        eligibleCount: eligible.length,
-        triggered: mode === 'enforce' ? filteredCount > 0 : enforceFilteredCount > 0,
-        gateStage,
-        blockedReason,
-        verticalDecision: {
+      strictThreshold: compositeGateStrict,
+      relaxedThreshold: compositeGateRelaxed,
+      thresholdVersion: compositeGateThresholdVersion,
+      sameVerticalFallbackEnabled,
+      baseEligibleCount: baseEligible.length,
+      strictEligibleCount: strictEligible.length,
+      relaxedEligibleCount: relaxedEligible.length,
+      filteredCount: mode === 'enforce' ? filteredCount : enforceFilteredCount,
+      eligibleCount: eligible.length,
+      triggered: mode === 'enforce' ? filteredCount > 0 : enforceFilteredCount > 0,
+      gateStage,
+      blockedReason,
+      verticalDecision: {
         queryVertical: cleanText(firstVertical.queryVertical || 'general') || 'general',
         lockedVertical: cleanText(firstVertical.lockedVertical),
         targetVertical,
       },
     }),
+    gateStrategy: 'composite_single_gate',
+    gateWeights: compositeGateWeights,
+    compositeThresholdsApplied: {
+      strict: compositeGateStrict,
+      relaxed: compositeGateRelaxed,
+      thresholdVersion: compositeGateThresholdVersion,
+      mode,
+    },
+    scoredCandidatesDebug,
     relevanceDebug: {
       relevanceScore: winnerLike ? clamp01(winnerLike.relevanceScore) : 0,
       componentScores: winnerLike?.relevanceComponentScores && typeof winnerLike.relevanceComponentScores === 'object'
@@ -523,6 +667,17 @@ export function rankOpportunityCandidates(input = {}) {
   const topicCoverageThreshold = clamp01(
     input.topicCoverageThreshold ?? DEFAULT_TOPIC_COVERAGE_THRESHOLD,
   )
+  const compositeGateStrict = clamp01(input.compositeGateStrict ?? DEFAULT_COMPOSITE_GATE_STRICT)
+  const compositeGateRelaxedRaw = clamp01(input.compositeGateRelaxed ?? DEFAULT_COMPOSITE_GATE_RELAXED)
+  const compositeGateRelaxed = Math.min(compositeGateStrict, compositeGateRelaxedRaw)
+  const compositeGateThresholdVersion = cleanText(
+    input.compositeGateThresholdVersion || DEFAULT_COMPOSITE_GATE_THRESHOLD_VERSION,
+  ) || DEFAULT_COMPOSITE_GATE_THRESHOLD_VERSION
+  const compositeGateWeights = normalizeCompositeGateWeights({
+    fusedWeight: input.compositeGateFusedWeight,
+    relevanceWeight: input.compositeGateRelevanceWeight,
+    topicWeight: input.compositeGateTopicWeight,
+  })
 
   const blockedTopic = containsBlockedTopic(`${query} ${answerText}`, blockedTopics)
   if (blockedTopic) {
@@ -554,6 +709,15 @@ export function rankOpportunityCandidates(input = {}) {
         topicCoverageGateEnabled,
         topicCoverageThreshold,
         topicCoverageFilteredCount: 0,
+        gateStrategy: 'composite_single_gate',
+        gateWeights: compositeGateWeights,
+        thresholdsApplied: {
+          topicCoverage: topicCoverageThreshold,
+          strict: compositeGateStrict,
+          relaxed: compositeGateRelaxed,
+          thresholdVersion: compositeGateThresholdVersion,
+        },
+        candidates: [],
         relevanceDebug: {
           relevanceScore: 0,
           componentScores: {
@@ -611,6 +775,15 @@ export function rankOpportunityCandidates(input = {}) {
         topicCoverageGateEnabled,
         topicCoverageThreshold,
         topicCoverageFilteredCount: 0,
+        gateStrategy: 'composite_single_gate',
+        gateWeights: compositeGateWeights,
+        thresholdsApplied: {
+          topicCoverage: topicCoverageThreshold,
+          strict: compositeGateStrict,
+          relaxed: compositeGateRelaxed,
+          thresholdVersion: compositeGateThresholdVersion,
+        },
+        candidates: [],
         relevanceDebug: {
           relevanceScore: 0,
           componentScores: {
@@ -646,7 +819,6 @@ export function rankOpportunityCandidates(input = {}) {
   const topicCoverageEligible = topicCoverageGateEnabled
     ? baseEligible.filter((item) => (
       toFiniteNumber(item?.topicCoverageScore, 0) >= topicCoverageThreshold
-      || toFiniteNumber(item?.brandEntityHitCount, 0) > 0
     ))
     : baseEligible
   const topicCoverageFilteredCount = Math.max(0, baseEligible.length - topicCoverageEligible.length)
@@ -656,6 +828,13 @@ export function rankOpportunityCandidates(input = {}) {
     placementId,
     query,
     answerText,
+    compositeGateStrict,
+    compositeGateRelaxed,
+    compositeGateThresholdVersion,
+    compositeGateFusedWeight: compositeGateWeights.fused,
+    compositeGateRelevanceWeight: compositeGateWeights.relevance,
+    compositeGateTopicWeight: compositeGateWeights.topic,
+    topicCoverageThreshold,
   })
   const eligible = relevanceSelection.eligible
   const relevanceFilteredCount = relevanceSelection.filteredCount
@@ -675,6 +854,19 @@ export function rankOpportunityCandidates(input = {}) {
         topicCoverageGateEnabled,
         topicCoverageThreshold,
         topicCoverageFilteredCount,
+        gateStrategy: cleanText(relevanceSelection.gateStrategy || 'composite_single_gate') || 'composite_single_gate',
+        gateWeights: relevanceSelection.gateWeights && typeof relevanceSelection.gateWeights === 'object'
+          ? relevanceSelection.gateWeights
+          : compositeGateWeights,
+        thresholdsApplied: {
+          topicCoverage: topicCoverageThreshold,
+          strict: compositeGateStrict,
+          relaxed: compositeGateRelaxed,
+          thresholdVersion: compositeGateThresholdVersion,
+        },
+        candidates: Array.isArray(relevanceSelection.scoredCandidatesDebug)
+          ? relevanceSelection.scoredCandidatesDebug
+          : [],
         relevanceDebug: relevanceSelection.relevanceDebug,
         pricingModel: pricingDefaults.modelVersion,
       },
@@ -718,6 +910,7 @@ export function rankOpportunityCandidates(input = {}) {
     winnerLexicalScore: winner ? toFiniteNumber(winner.lexicalScore, 0) : 0,
     winnerVectorScore: winner ? toFiniteNumber(winner.vectorScore, 0) : 0,
     winnerRelevanceScore: winner ? toFiniteNumber(winner.relevanceScore, 0) : 0,
+    winnerGateScore: winner ? toFiniteNumber(winner.gateScore, 0) : 0,
   }
 
   if (!winner || winner.rankScore < scoreFloor) {
@@ -738,6 +931,19 @@ export function rankOpportunityCandidates(input = {}) {
         topicCoverageGateEnabled,
         topicCoverageThreshold,
         topicCoverageFilteredCount,
+        gateStrategy: cleanText(relevanceSelection.gateStrategy || 'composite_single_gate') || 'composite_single_gate',
+        gateWeights: relevanceSelection.gateWeights && typeof relevanceSelection.gateWeights === 'object'
+          ? relevanceSelection.gateWeights
+          : compositeGateWeights,
+        thresholdsApplied: {
+          topicCoverage: topicCoverageThreshold,
+          strict: compositeGateStrict,
+          relaxed: compositeGateRelaxed,
+          thresholdVersion: compositeGateThresholdVersion,
+        },
+        candidates: Array.isArray(relevanceSelection.scoredCandidatesDebug)
+          ? relevanceSelection.scoredCandidatesDebug
+          : [],
         relevanceDebug: {
           ...relevanceSelection.relevanceDebug,
           relevanceScore: winner ? clamp01(winner.relevanceScore) : relevanceSelection.relevanceDebug.relevanceScore,
@@ -777,6 +983,19 @@ export function rankOpportunityCandidates(input = {}) {
       topicCoverageGateEnabled,
       topicCoverageThreshold,
       topicCoverageFilteredCount,
+      gateStrategy: cleanText(relevanceSelection.gateStrategy || 'composite_single_gate') || 'composite_single_gate',
+      gateWeights: relevanceSelection.gateWeights && typeof relevanceSelection.gateWeights === 'object'
+        ? relevanceSelection.gateWeights
+        : compositeGateWeights,
+      thresholdsApplied: {
+        topicCoverage: topicCoverageThreshold,
+        strict: compositeGateStrict,
+        relaxed: compositeGateRelaxed,
+        thresholdVersion: compositeGateThresholdVersion,
+      },
+      candidates: Array.isArray(relevanceSelection.scoredCandidatesDebug)
+        ? relevanceSelection.scoredCandidatesDebug
+        : [],
       relevanceDebug: {
         ...relevanceSelection.relevanceDebug,
         relevanceScore: clamp01(winner.relevanceScore),

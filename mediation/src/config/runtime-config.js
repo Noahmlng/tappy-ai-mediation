@@ -197,13 +197,13 @@ export function loadRuntimeConfig(env = process.env, options = {}) {
         strategy: 'rrf_then_linear',
         sparseWeight: toNumberInRange(
           readEnv(env, 'MEDIATION_HYBRID_SPARSE_WEIGHT', { required: false }),
-          0.65,
+          0.8,
           0,
           1,
         ),
         denseWeight: toNumberInRange(
           readEnv(env, 'MEDIATION_HYBRID_DENSE_WEIGHT', { required: false }),
-          0.35,
+          0.2,
           0,
           1,
         ),
@@ -226,6 +226,23 @@ export function loadRuntimeConfig(env = process.env, options = {}) {
         readEnv(env, 'MEDIATION_HOUSE_LOWINFO_FILTER_ENABLED', { required: false }),
         true,
       ),
+      topicCoverageThreshold: toNumberInRange(
+        readEnv(env, 'MEDIATION_TOPIC_COVERAGE_THRESHOLD', { required: false }),
+        0.05,
+      ),
+      compositeGateStrict: toNumberInRange(
+        readEnv(env, 'MEDIATION_COMPOSITE_GATE_STRICT', { required: false }),
+        0.44,
+      ),
+      compositeGateRelaxed: toNumberInRange(
+        readEnv(env, 'MEDIATION_COMPOSITE_GATE_RELAXED', { required: false }),
+        0.36,
+      ),
+      compositeGateThresholdVersion: readEnv(
+        env,
+        'MEDIATION_COMPOSITE_GATE_THRESHOLD_VERSION',
+        { required: false },
+      ) || 'composite_single_gate_v1',
     },
     relevancePolicyV2: {
       enabled: parseBoolean(

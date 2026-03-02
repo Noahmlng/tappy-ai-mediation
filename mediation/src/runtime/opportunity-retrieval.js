@@ -11,13 +11,13 @@ const DEFAULT_INTENT_MIN_LEXICAL_SCORE = 0.02
 const DEFAULT_HOUSE_LOWINFO_FILTER_ENABLED = true
 const HOUSE_LOWINFO_TEMPLATE_PHRASE = 'option with strong category relevance and direct shopping intent'
 const DEFAULT_HYBRID_STRATEGY = 'rrf_then_linear'
-const DEFAULT_HYBRID_SPARSE_WEIGHT = 0.65
-const DEFAULT_HYBRID_DENSE_WEIGHT = 0.35
+const DEFAULT_HYBRID_SPARSE_WEIGHT = 0.8
+const DEFAULT_HYBRID_DENSE_WEIGHT = 0.2
 const DEFAULT_BM25_REFRESH_INTERVAL_MS = 10 * 60 * 1000
 const DEFAULT_BM25_COLD_START_WAIT_MS = 120
 const DEFAULT_BRAND_MISS_PENALTY = 0.08
 const DEFAULT_HOUSE_SHARE_CAP = 0.6
-const DEFAULT_TOPIC_COVERAGE_THRESHOLD = 0.1
+const DEFAULT_TOPIC_COVERAGE_THRESHOLD = 0.05
 const DEFAULT_HOUSE_BRAND_MISS_MIN_PENALTY = 0.18
 const DEFAULT_HOUSE_BRAND_MISS_DYNAMIC_RATIO = 0.45
 const DEFAULT_HOUSE_BRAND_MISS_MAX_PENALTY = 0.65
@@ -337,18 +337,6 @@ function applyBrandIntentProtection(candidates = [], policy = {}) {
 
   const sorted = [...penalized].sort(compareHybridCandidates)
   const houseShareBeforeCap = computeHouseShare(sorted, finalTopK)
-  const hasBrandHitCandidate = sorted.some((candidate) => toPositiveInteger(candidate?.brandEntityHitCount, 0) > 0)
-  if (!hasBrandHitCandidate) {
-    return {
-      candidates: [],
-      brandIntentDetected,
-      brandEntityTokens,
-      penaltiesApplied,
-      houseShareBeforeCap,
-      houseShareAfterCap: 0,
-      brandIntentBlockedNoHit: true,
-    }
-  }
 
   const hasPartnerstackBrandHit = sorted.some((candidate) => (
     cleanText(candidate?.network).toLowerCase() === 'partnerstack'
