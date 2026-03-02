@@ -37,6 +37,12 @@ function cleanText(value) {
   return String(value || '').trim().replace(/\s+/g, ' ')
 }
 
+function clipText(value, maxLength = 220) {
+  const text = cleanText(value)
+  if (!text) return ''
+  return text.length <= maxLength ? text : `${text.slice(0, maxLength)}...`
+}
+
 function toPositiveInteger(value, fallback) {
   const n = Number(value)
   if (!Number.isFinite(n) || n <= 0) return fallback
@@ -392,6 +398,99 @@ function tokenize(value = '') {
     .filter((item) => item.length >= 2)
 }
 
+function extractUrlTokens(url = '') {
+  const raw = cleanText(url)
+  if (!raw) return []
+  let parsed
+  try {
+    parsed = new URL(raw)
+  } catch {
+    return []
+  }
+  const hostTokens = String(parsed.hostname || '')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/g)
+    .filter((item) => item.length >= 2)
+  const pathTokens = String(parsed.pathname || '')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/g)
+    .filter((item) => item.length >= 2)
+  return Array.from(new Set([...hostTokens, ...pathTokens]))
+}
+
+function collectMetadataSegments(value, out = [], dedupe = new Set(), depth = 0, limit = 64) {
+  if (out.length >= limit || depth > 2) return
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    const text = cleanText(value)
+    if (!text) return
+    const key = text.toLowerCase()
+    if (dedupe.has(key)) return
+    dedupe.add(key)
+    out.push(text)
+    return
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      if (out.length >= limit) break
+      collectMetadataSegments(item, out, dedupe, depth + 1, limit)
+    }
+    return
+  }
+  if (!value || typeof value !== 'object') return
+  for (const [key, nested] of Object.entries(value)) {
+    if (out.length >= limit) break
+    if (String(key || '').toLowerCase() === 'retrievaltext') continue
+    collectMetadataSegments(nested, out, dedupe, depth + 1, limit)
+  }
+}
+
+function buildCandidateRetrievalText(candidate = {}) {
+  const metadata = candidate?.metadata && typeof candidate.metadata === 'object' ? candidate.metadata : {}
+  if (cleanText(candidate?.retrievalText)) return cleanText(candidate.retrievalText)
+  if (cleanText(metadata.retrievalText)) return cleanText(metadata.retrievalText)
+
+  const tags = Array.isArray(candidate?.tags) ? candidate.tags : []
+  const metadataDirect = [
+    metadata.brand,
+    metadata.brandName,
+    metadata.brand_name,
+    metadata.brandId,
+    metadata.brand_id,
+    metadata.merchant,
+    metadata.merchantName,
+    metadata.merchant_name,
+    metadata.productName,
+    metadata.product_name,
+    metadata.category,
+    metadata.verticalL1,
+    metadata.vertical_l1,
+    metadata.verticalL2,
+    metadata.vertical_l2,
+    metadata.useCase,
+    metadata.use_case,
+    metadata.solution,
+  ]
+  const nested = []
+  collectMetadataSegments(metadata, nested, new Set(), 0, 64)
+  const segments = [
+    candidate?.title,
+    candidate?.description,
+    ...tags,
+    ...metadataDirect,
+    ...nested,
+    ...extractUrlTokens(candidate?.targetUrl),
+  ]
+    .map((item) => cleanText(item))
+    .filter(Boolean)
+  return cleanText(Array.from(new Set(segments)).join(' '))
+}
+
+function computeQueryTokenMatches(candidate = {}, queryTokens = []) {
+  if (!Array.isArray(queryTokens) || queryTokens.length <= 0) return []
+  const candidateTokens = new Set(tokenizeTopic(buildCandidateRetrievalText(candidate)))
+  return Array.from(new Set(queryTokens.filter((token) => candidateTokens.has(token))))
+}
+
 function tokenizeTopic(value = '') {
   return tokenize(value)
     .filter((token) => token.length >= 3)
@@ -412,23 +511,7 @@ function overlapScore(queryTokens = [], candidateTokens = []) {
 
 function computeTopicCoverageScore(candidate = {}, queryTokens = []) {
   if (!Array.isArray(queryTokens) || queryTokens.length <= 0) return 0
-  const metadata = candidate?.metadata && typeof candidate.metadata === 'object' ? candidate.metadata : {}
-  const tags = Array.isArray(candidate?.tags) ? candidate.tags : []
-  const corpus = [
-    candidate?.title,
-    candidate?.description,
-    metadata.brand,
-    metadata.brandName,
-    metadata.brand_name,
-    metadata.merchant,
-    metadata.merchantName,
-    metadata.merchant_name,
-    ...tags,
-  ]
-    .map((item) => String(item || '').trim())
-    .filter(Boolean)
-    .join(' ')
-  const candidateTokens = tokenizeTopic(corpus)
+  const candidateTokens = tokenizeTopic(buildCandidateRetrievalText(candidate))
   return round(overlapScore(queryTokens, candidateTokens))
 }
 
@@ -454,7 +537,13 @@ function toFallbackCandidate(offer = {}, query = '') {
     : (Array.isArray(metadata.tags) ? metadata.tags : [])
   const title = cleanText(offer.title)
   const description = cleanText(offer.description)
-  const corpus = `${title} ${description} ${tags.join(' ')}`
+  const corpus = buildCandidateRetrievalText({
+    title,
+    description,
+    targetUrl: cleanText(offer.targetUrl || offer.trackingUrl),
+    tags,
+    metadata: normalizedMetadata,
+  })
   const queryTokens = tokenize(query)
   const candidateTokens = tokenize(corpus)
   const lexicalScore = overlapScore(queryTokens, candidateTokens)
@@ -481,6 +570,7 @@ function toFallbackCandidate(offer = {}, query = '') {
     tags,
     metadata: normalizedMetadata,
     updatedAt: cleanText(offer.updatedAt),
+    retrievalText: corpus,
     lexicalScore: toFiniteNumber(lexicalScore, 0),
     vectorScore: toFiniteNumber(vectorScore, 0),
     fusedScore: toFiniteNumber(fusedScore, 0),
@@ -599,7 +689,7 @@ async function fetchVectorCandidates(pool, query, filters = {}, topK = DEFAULT_V
 }
 
 function mergeCandidate(base = {}, override = {}) {
-  return {
+  const merged = {
     offerId: cleanText(override.offer_id || base.offerId),
     network: cleanText(override.network || base.network),
     upstreamOfferId: cleanText(override.upstream_offer_id || base.upstreamOfferId),
@@ -627,6 +717,14 @@ function mergeCandidate(base = {}, override = {}) {
     rrfScore: toFiniteNumber(override.rrfScore ?? base.rrfScore, 0),
     lexicalRank: toPositiveInteger(override.lexicalRank ?? base.lexicalRank, 0),
     vectorRank: toPositiveInteger(override.vectorRank ?? base.vectorRank, 0),
+  }
+  return {
+    ...merged,
+    retrievalText: cleanText(
+      override.retrieval_text
+      || base.retrievalText
+      || merged?.metadata?.retrievalText,
+    ) || buildCandidateRetrievalText(merged),
   }
 }
 
@@ -769,23 +867,32 @@ function applyHybridLinearFusion(candidates = [], policy = {}) {
 
 function buildDebugOptions(candidates = [], options = {}) {
   const limit = Math.max(1, toPositiveInteger(options.limit, 20))
+  const queryTokens = Array.isArray(options.queryTokens)
+    ? options.queryTokens.map((item) => cleanText(item).toLowerCase()).filter(Boolean)
+    : []
   return (Array.isArray(candidates) ? candidates : [])
     .slice(0, limit)
-    .map((candidate) => ({
-      offerId: cleanText(candidate?.offerId),
-      network: cleanText(candidate?.network).toLowerCase(),
-      lexicalScore: round(toFiniteNumber(candidate?.lexicalScore, 0)),
-      bm25Raw: round(toFiniteNumber(candidate?.bm25Raw, 0)),
-      vectorScore: round(toFiniteNumber(candidate?.vectorScore, 0)),
-      fusedScore: round(toFiniteNumber(candidate?.fusedScore, 0)),
-      sparseScoreNormalized: round(toFiniteNumber(candidate?.sparseScoreNormalized, 0)),
-      denseScoreNormalized: round(toFiniteNumber(candidate?.denseScoreNormalized, 0)),
-      rrfScore: round(toFiniteNumber(candidate?.rrfScore, 0)),
-      topicCoverageScore: round(toFiniteNumber(candidate?.topicCoverageScore, 0)),
-      brandEntityHitCount: toPositiveInteger(candidate?.brandEntityHitCount, 0),
-      penaltyApplied: round(toFiniteNumber(candidate?.penaltyApplied, 0)),
-      eliminationReason: cleanText(candidate?.eliminationReason),
-    }))
+    .map((candidate) => {
+      const queryTokensMatched = computeQueryTokenMatches(candidate, queryTokens).slice(0, 12)
+      return {
+        offerId: cleanText(candidate?.offerId),
+        network: cleanText(candidate?.network).toLowerCase(),
+        lexicalScore: round(toFiniteNumber(candidate?.lexicalScore, 0)),
+        bm25Raw: round(toFiniteNumber(candidate?.bm25Raw, 0)),
+        vectorScore: round(toFiniteNumber(candidate?.vectorScore, 0)),
+        fusedScore: round(toFiniteNumber(candidate?.fusedScore, 0)),
+        sparseScoreNormalized: round(toFiniteNumber(candidate?.sparseScoreNormalized, 0)),
+        denseScoreNormalized: round(toFiniteNumber(candidate?.denseScoreNormalized, 0)),
+        rrfScore: round(toFiniteNumber(candidate?.rrfScore, 0)),
+        topicCoverageScore: round(toFiniteNumber(candidate?.topicCoverageScore, 0)),
+        brandEntityHitCount: toPositiveInteger(candidate?.brandEntityHitCount, 0),
+        penaltyApplied: round(toFiniteNumber(candidate?.penaltyApplied, 0)),
+        eliminationReason: cleanText(candidate?.eliminationReason),
+        retrievalTextPreview: clipText(buildCandidateRetrievalText(candidate), 180),
+        queryTokensMatched,
+        bm25TermHits: queryTokensMatched,
+      }
+    })
 }
 
 function normalizeHybridStrategy(value) {
@@ -803,6 +910,9 @@ export async function retrieveOpportunityCandidates(input = {}, options = {}) {
   const topicQuery = cleanText(input.topicQuery || semanticQuery || query || sparseQuery)
   const topicCoverageThreshold = clamp01(input.topicCoverageThreshold, DEFAULT_TOPIC_COVERAGE_THRESHOLD)
   const topicSignalTokens = tokenizeTopic(topicQuery)
+  const sparseQueryTokens = Array.from(new Set(
+    tokenizeTopic(sparseQuery || semanticQuery || query),
+  )).slice(0, 24)
   const queryForFallback = sparseQuery || semanticQuery || query
   const queryMode = cleanText(input.queryMode).toLowerCase() || 'raw_query'
   const contextWindowMode = cleanText(input.contextWindowMode).toLowerCase() || 'latest_turn_only'
@@ -861,6 +971,8 @@ export async function retrieveOpportunityCandidates(input = {}, options = {}) {
     queryUsed: sparseQuery || semanticQuery,
     semanticQuery,
     sparseQuery,
+    sparseQueryTokens,
+    vectorInputTextPreview: clipText(semanticQuery, 220),
     topicQuery,
     topicCoverageThreshold,
     contextWindowMode,
@@ -961,7 +1073,7 @@ export async function retrieveOpportunityCandidates(input = {}, options = {}) {
               houseShareBeforeCap: brandProtected.houseShareBeforeCap,
               houseShareAfterCap: brandProtected.houseShareAfterCap,
               brandIntentBlockedNoHit: brandProtected.brandIntentBlockedNoHit,
-              options: buildDebugOptions(withTopicCoverage, { limit: finalTopK }),
+              options: buildDebugOptions(withTopicCoverage, { limit: finalTopK, queryTokens: sparseQueryTokens }),
               mode: String(fallbackResult?.debug?.mode || 'connector_live_fallback'),
               fallbackMeta: fallbackResult?.debug && typeof fallbackResult.debug === 'object'
                 ? fallbackResult.debug
@@ -982,7 +1094,7 @@ export async function retrieveOpportunityCandidates(input = {}, options = {}) {
             houseShareBeforeCap: brandProtected.houseShareBeforeCap,
             houseShareAfterCap: brandProtected.houseShareAfterCap,
             brandIntentBlockedNoHit: brandProtected.brandIntentBlockedNoHit,
-            options: buildDebugOptions(withTopicCoverage, { limit: finalTopK }),
+            options: buildDebugOptions(withTopicCoverage, { limit: finalTopK, queryTokens: sparseQueryTokens }),
             mode: String(fallbackResult?.debug?.mode || 'connector_live_fallback_empty'),
             fallbackMeta: fallbackResult?.debug && typeof fallbackResult.debug === 'object'
               ? fallbackResult.debug
@@ -1057,7 +1169,7 @@ export async function retrieveOpportunityCandidates(input = {}, options = {}) {
       houseShareBeforeCap: brandProtected.houseShareBeforeCap,
       houseShareAfterCap: brandProtected.houseShareAfterCap,
       brandIntentBlockedNoHit: brandProtected.brandIntentBlockedNoHit,
-      options: buildDebugOptions(withTopicCoverage, { limit: finalTopK }),
+      options: buildDebugOptions(withTopicCoverage, { limit: finalTopK, queryTokens: sparseQueryTokens }),
     }),
   }
 }

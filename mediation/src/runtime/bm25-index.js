@@ -88,8 +88,57 @@ function tokenize(value = '') {
     })
 }
 
+function extractUrlTokens(url = '') {
+  const raw = cleanText(url)
+  if (!raw) return []
+  let parsed
+  try {
+    parsed = new URL(raw)
+  } catch {
+    return []
+  }
+  const hostTokens = String(parsed.hostname || '')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/g)
+    .filter((item) => item.length >= 2)
+  const pathTokens = String(parsed.pathname || '')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/g)
+    .filter((item) => item.length >= 2)
+  return Array.from(new Set([...hostTokens, ...pathTokens]))
+}
+
+function collectMetadataSegments(value, out = [], dedupe = new Set(), depth = 0, limit = 64) {
+  if (out.length >= limit || depth > 2) return
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    const text = cleanText(value)
+    if (!text) return
+    const key = text.toLowerCase()
+    if (dedupe.has(key)) return
+    dedupe.add(key)
+    out.push(text)
+    return
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      if (out.length >= limit) break
+      collectMetadataSegments(item, out, dedupe, depth + 1, limit)
+    }
+    return
+  }
+  if (!value || typeof value !== 'object') return
+  for (const [key, nested] of Object.entries(value)) {
+    if (out.length >= limit) break
+    if (String(key || '').toLowerCase() === 'retrievaltext') continue
+    collectMetadataSegments(nested, out, dedupe, depth + 1, limit)
+  }
+}
+
 function buildMetadataCorpus(metadata = {}) {
   if (!metadata || typeof metadata !== 'object') return ''
+  if (cleanText(metadata.retrievalText)) {
+    return cleanText(metadata.retrievalText)
+  }
   const fields = [
     metadata.brand,
     metadata.brandName,
@@ -106,8 +155,13 @@ function buildMetadataCorpus(metadata = {}) {
     metadata.vertical_l1,
     metadata.verticalL2,
     metadata.vertical_l2,
+    metadata.useCase,
+    metadata.use_case,
+    metadata.solution,
   ]
-  return fields.map((item) => cleanText(item)).filter(Boolean).join(' ')
+  const nested = []
+  collectMetadataSegments(metadata, nested, new Set(), 0, 64)
+  return [...fields.map((item) => cleanText(item)), ...nested].filter(Boolean).join(' ')
 }
 
 function normalizeServingRow(row = {}) {
@@ -135,7 +189,8 @@ function normalizeServingRow(row = {}) {
 function buildDocumentCorpus(row = {}) {
   const tags = Array.isArray(row.tags) ? row.tags.join(' ') : ''
   const metadataText = buildMetadataCorpus(row.metadata)
-  return cleanText(`${row.title} ${row.description} ${tags} ${metadataText}`)
+  const urlText = extractUrlTokens(row.target_url).join(' ')
+  return cleanText(`${row.title} ${row.description} ${tags} ${metadataText} ${urlText}`)
 }
 
 function toTimestampValue(value = '') {

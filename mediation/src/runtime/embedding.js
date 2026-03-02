@@ -43,12 +43,15 @@ export function buildTextEmbedding(input = {}, options = {}) {
 
   const title = cleanText(input.title)
   const description = cleanText(input.description)
+  const retrievalText = cleanText(input.retrievalText)
   const tags = Array.isArray(input.tags) ? input.tags : []
-  const tokens = [
-    ...tokenize(title),
-    ...tokenize(description),
-    ...tags.flatMap((item) => tokenize(item)),
-  ]
+  const baseTokens = retrievalText
+    ? tokenize(retrievalText)
+    : [
+        ...tokenize(title),
+        ...tokenize(description),
+      ]
+  const tokens = [...baseTokens, ...tags.flatMap((item) => tokenize(item))]
 
   for (const token of tokens) {
     const hash = hash32(token)

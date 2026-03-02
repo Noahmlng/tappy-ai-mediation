@@ -294,6 +294,8 @@ test('v2 bid API returns unified response on the single runtime path', async () 
       assert.equal(typeof bid.payload?.diagnostics?.retrievalDebug?.queryUsed, 'string')
       assert.equal(typeof bid.payload?.diagnostics?.retrievalDebug?.semanticQuery, 'string')
       assert.equal(typeof bid.payload?.diagnostics?.retrievalDebug?.sparseQuery, 'string')
+      assert.equal(Array.isArray(bid.payload?.diagnostics?.retrievalDebug?.sparseQueryTokens), true)
+      assert.equal(typeof bid.payload?.diagnostics?.retrievalDebug?.vectorInputTextPreview, 'string')
       assert.equal(typeof bid.payload?.diagnostics?.retrievalDebug?.contextWindowMode, 'string')
       assert.equal(Array.isArray(bid.payload?.diagnostics?.retrievalDebug?.assistantEntityTokensRaw), true)
       assert.equal(Array.isArray(bid.payload?.diagnostics?.retrievalDebug?.assistantEntityTokensFiltered), true)
@@ -303,6 +305,15 @@ test('v2 bid API returns unified response on the single runtime path', async () 
       assert.equal(Array.isArray(bid.payload?.diagnostics?.retrievalDebug?.brandEntityTokens), true)
       assert.equal(Array.isArray(bid.payload?.diagnostics?.retrievalDebug?.penaltiesApplied), true)
       assert.equal(Array.isArray(bid.payload?.diagnostics?.retrievalDebug?.options), true)
+      const retrievalOptions = Array.isArray(bid.payload?.diagnostics?.retrievalDebug?.options)
+        ? bid.payload.diagnostics.retrievalDebug.options
+        : []
+      if (retrievalOptions.length > 0) {
+        const retrievalOption0 = retrievalOptions[0]
+        assert.equal(typeof retrievalOption0?.retrievalTextPreview, 'string')
+        assert.equal(Array.isArray(retrievalOption0?.queryTokensMatched), true)
+        assert.equal(Array.isArray(retrievalOption0?.bm25TermHits), true)
+      }
       assert.equal(typeof bid.payload?.diagnostics?.retrievalDebug?.houseShareBeforeCap, 'number')
       assert.equal(typeof bid.payload?.diagnostics?.retrievalDebug?.houseShareAfterCap, 'number')
       assert.equal(typeof bid.payload?.diagnostics?.retrievalDebug?.scoring, 'object')

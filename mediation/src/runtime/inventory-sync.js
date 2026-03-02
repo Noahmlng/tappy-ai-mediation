@@ -37,6 +37,94 @@ function normalizeTags(value) {
   ))
 }
 
+function clipText(value, maxLength = 2000) {
+  const text = cleanText(value)
+  if (!text) return ''
+  return text.length <= maxLength ? text : text.slice(0, maxLength)
+}
+
+function extractUrlTokens(url = '') {
+  const raw = cleanText(url)
+  if (!raw) return []
+  let parsed
+  try {
+    parsed = new URL(raw)
+  } catch {
+    return []
+  }
+  const hostTokens = String(parsed.hostname || '')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/g)
+    .filter((item) => item.length >= 2)
+  const pathTokens = String(parsed.pathname || '')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/g)
+    .filter((item) => item.length >= 2)
+  return Array.from(new Set([...hostTokens, ...pathTokens]))
+}
+
+function collectMetadataTextSegments(value, out = [], dedupe = new Set(), depth = 0, limit = 64) {
+  if (out.length >= limit || depth > 2) return
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    const text = cleanText(value)
+    if (!text) return
+    const key = text.toLowerCase()
+    if (dedupe.has(key)) return
+    dedupe.add(key)
+    out.push(text)
+    return
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      if (out.length >= limit) break
+      collectMetadataTextSegments(item, out, dedupe, depth + 1, limit)
+    }
+    return
+  }
+  if (!value || typeof value !== 'object') return
+  for (const [key, nested] of Object.entries(value)) {
+    if (out.length >= limit) break
+    if (String(key || '').toLowerCase() === 'retrievaltext') continue
+    collectMetadataTextSegments(nested, out, dedupe, depth + 1, limit)
+  }
+}
+
+function buildRetrievalTextFromParts(input = {}) {
+  const metadata = input?.metadata && typeof input.metadata === 'object' ? input.metadata : {}
+  const tags = Array.isArray(input.tags) ? input.tags : []
+  const metadataDirect = [
+    metadata.brand,
+    metadata.brandName,
+    metadata.brand_name,
+    metadata.brandId,
+    metadata.brand_id,
+    metadata.merchant,
+    metadata.merchantName,
+    metadata.merchant_name,
+    metadata.productName,
+    metadata.product_name,
+    metadata.category,
+    metadata.verticalL1,
+    metadata.vertical_l1,
+    metadata.verticalL2,
+    metadata.vertical_l2,
+    metadata.useCase,
+    metadata.use_case,
+    metadata.solution,
+  ]
+  const metadataNested = []
+  collectMetadataTextSegments(metadata, metadataNested, new Set(), 0, 64)
+  const segments = [
+    cleanText(input.title),
+    cleanText(input.description),
+    ...tags.map((item) => cleanText(item)),
+    ...metadataDirect.map((item) => cleanText(item)),
+    ...metadataNested,
+    ...extractUrlTokens(input.targetUrl),
+  ].filter(Boolean)
+  return clipText(Array.from(new Set(segments)).join(' '), 2000)
+}
+
 function normalizeHouseLocale(value) {
   return cleanText(value).toLowerCase().replace(/_/g, '-')
 }
@@ -220,6 +308,17 @@ function toNormalizedInventoryRow(network, offer = {}) {
     cleanText(metadata.category),
     cleanText(offer.entityText),
   ])
+  const retrievalText = buildRetrievalTextFromParts({
+    title: offer.title,
+    description: offer.description,
+    targetUrl: offer.targetUrl,
+    tags,
+    metadata,
+  })
+  if (retrievalText) {
+    metadata.retrievalText = retrievalText
+    metadata.retrievalTextVersion = 'v1_enriched_2026_03_02'
+  }
 
   return {
     offerId: cleanText(offer.offerId),
@@ -567,10 +666,19 @@ export async function buildInventoryEmbeddings(pool, input = {}) {
 
       const params = []
       const valuesSql = chunk.map((row, index) => {
+        const metadata = row?.metadata && typeof row.metadata === 'object' ? row.metadata : {}
+        const retrievalText = buildRetrievalTextFromParts({
+          title: row.title,
+          description: row.description,
+          targetUrl: row.target_url,
+          tags: Array.isArray(row.tags) ? row.tags : [],
+          metadata,
+        })
         const embedding = buildTextEmbedding({
           title: row.title,
           description: row.description,
           tags: Array.isArray(row.tags) ? row.tags : [],
+          retrievalText,
         })
         const base = index * 3
         params.push(
@@ -608,7 +716,7 @@ export async function buildInventoryEmbeddings(pool, input = {}) {
   if (normalizedOfferIds.length > 0) {
     const result = await pool.query(
       `
-        SELECT offer_id, title, description, tags
+        SELECT offer_id, title, description, tags, target_url, metadata
         FROM offer_inventory_norm
         WHERE availability = 'active'
           AND offer_id = ANY($1::text[])
@@ -635,7 +743,7 @@ export async function buildInventoryEmbeddings(pool, input = {}) {
     while (true) {
       const result = await pool.query(
         `
-          SELECT offer_id, title, description, tags
+          SELECT offer_id, title, description, tags, target_url, metadata
           FROM offer_inventory_norm
           WHERE availability = 'active'
             AND ($1::text = '' OR offer_id > $1::text)
@@ -665,7 +773,7 @@ export async function buildInventoryEmbeddings(pool, input = {}) {
 
   const result = await pool.query(
     `
-      SELECT offer_id, title, description, tags
+      SELECT offer_id, title, description, tags, target_url, metadata
       FROM offer_inventory_norm
       WHERE availability = 'active'
       ORDER BY updated_at DESC

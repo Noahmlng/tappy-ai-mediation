@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { buildInventoryEmbeddings } from '../../src/runtime/inventory-sync.js'
+import { buildTextEmbedding, vectorToSqlLiteral } from '../../src/runtime/embedding.js'
 
 function createMockPool(rows = []) {
   const upserts = []
@@ -16,6 +17,7 @@ function createMockPool(rows = []) {
           upserts.push({
             offerId: params[base],
             model: params[base + 1],
+            vectorLiteral: params[base + 2],
           })
         }
         return { rows: [] }
@@ -111,4 +113,35 @@ test('buildInventoryEmbeddings supports full rebuild mode with paging', async ()
   assert.equal(result.upserted, 3)
   assert.equal(result.batches, 1)
   assert.equal(pool.upserts.length, 3)
+})
+
+test('buildInventoryEmbeddings enriches embedding text with metadata/url retrieval context', async () => {
+  const pool = createMockPool([
+    {
+      offer_id: 'offer_meta_001',
+      title: 'AI Dubbing Tool',
+      description: 'Fast workflow',
+      tags: ['video'],
+      target_url: 'https://murf.ai/tools/video-dubbing',
+      metadata: {
+        brand: 'Murf AI',
+        useCase: 'Chinese to English YouTube dubbing',
+      },
+    },
+  ])
+
+  const result = await buildInventoryEmbeddings(pool, {
+    offerIds: ['offer_meta_001'],
+  })
+
+  assert.equal(result.ok, true)
+  assert.equal(result.upserted, 1)
+  assert.equal(pool.upserts.length, 1)
+
+  const baselineLiteral = vectorToSqlLiteral(buildTextEmbedding({
+    title: 'AI Dubbing Tool',
+    description: 'Fast workflow',
+    tags: ['video'],
+  }).vector)
+  assert.notEqual(pool.upserts[0].vectorLiteral, baselineLiteral)
 })
