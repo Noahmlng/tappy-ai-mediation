@@ -484,6 +484,67 @@ test('v2 bid API returns unified response on the single runtime path', async () 
   }
 })
 
+test('v2 bid API enforces cpc_v1 semantics even when CPC_SEMANTICS=off', async () => {
+  const suffix = `${Date.now()}_${Math.floor(Math.random() * 1000)}`
+  const scopedAccountId = `org_mediation_cpc_off_${suffix}`
+  const scopedAppId = `sample-client-app-cpc-off-${suffix}`
+  const port = 4160 + Math.floor(Math.random() * 120)
+  const baseUrl = `http://${HOST}:${port}`
+  const gateway = startGateway(port, {
+    CPC_SEMANTICS: 'off',
+  })
+
+  try {
+    await waitForGateway(baseUrl)
+
+    const dashboardHeaders = await registerDashboardHeaders(baseUrl, {
+      email: `v2_bid_cpc_off_${suffix}@example.com`,
+      accountId: scopedAccountId,
+      appId: scopedAppId,
+    })
+    const runtimeCredential = await issueRuntimeApiKeyHeaders(baseUrl, dashboardHeaders, {
+      accountId: scopedAccountId,
+      appId: scopedAppId,
+    })
+    const runtimeHeaders = {
+      Authorization: `Bearer ${runtimeCredential.secret}`,
+    }
+
+    const bid = await requestJson(baseUrl, '/api/v2/bid', {
+      method: 'POST',
+      headers: runtimeHeaders,
+      body: {
+        userId: 'user_cpc_semantics_off',
+        chatId: 'chat_cpc_semantics_off',
+        messages: [
+          { role: 'user', content: 'recommend me a voice tool membership deal' },
+          { role: 'assistant', content: 'I can compare pricing and trial options for you.' },
+        ],
+      },
+      timeoutMs: REQUEST_TIMEOUT_MS,
+    })
+    if (isTransientUpstreamTimeout(bid)) return
+
+    assert.equal(bid.status, 200, JSON.stringify(bid.payload))
+    assert.equal(String(bid.payload?.diagnostics?.pricingSemanticsVersion || ''), 'cpc_v1')
+
+    const winner = bid.payload?.data?.bid && typeof bid.payload.data.bid === 'object'
+      ? bid.payload.data.bid
+      : null
+    if (winner) {
+      assert.equal(String(winner.pricing?.pricingSemanticsVersion || ''), 'cpc_v1')
+      assert.equal(String(winner.pricing?.billingUnit || ''), 'cpc')
+      assert.equal(Number(winner.price || 0), Number(winner.pricing?.cpcUsd || 0))
+    }
+  } catch (error) {
+    const logs = gateway.getLogs()
+    const message = error instanceof Error ? error.message : String(error)
+    throw new Error(`[v2-bid-api-cpc-off] ${message}\n[gateway stdout]\n${logs.stdout}\n[gateway stderr]\n${logs.stderr}`)
+  } finally {
+    await stopGateway(gateway)
+  }
+})
+
 test('v2 bid API: chinese commerce query should pass intent gate and enter retrieval stage', async () => {
   const suffix = `${Date.now()}_${Math.floor(Math.random() * 1000)}`
   const scopedAccountId = `org_mediation_cn_${suffix}`

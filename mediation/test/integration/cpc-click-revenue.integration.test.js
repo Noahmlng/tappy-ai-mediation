@@ -114,7 +114,7 @@ async function waitForGateway(baseUrl) {
   throw new Error(`gateway health check timeout after ${HEALTH_TIMEOUT_MS}ms`)
 }
 
-function startGateway(port) {
+function startGateway(port, envOverrides = {}) {
   const child = spawn(process.execPath, [GATEWAY_ENTRY], {
     cwd: PROJECT_ROOT,
     env: {
@@ -130,6 +130,7 @@ function startGateway(port) {
       OPENROUTER_MODEL: 'glm-5',
       CJ_TOKEN: 'mock-cj-token',
       PARTNERSTACK_API_KEY: 'mock-partnerstack-key',
+      ...envOverrides,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
@@ -369,6 +370,86 @@ test('cpc click settlement: redirect bills CPC and duplicate sdk click keeps rev
     const message = error instanceof Error ? error.message : String(error)
     throw new Error(
       `[cpc-click-revenue] ${message}\n[gateway stdout]\n${logs.stdout}\n[gateway stderr]\n${logs.stderr}`,
+    )
+  } finally {
+    await stopGateway(gateway)
+  }
+})
+
+test('cpc click settlement uses cpcUsd even when CPC_SEMANTICS=off', async () => {
+  const suffix = `${Date.now()}_${Math.floor(Math.random() * 1000)}`
+  const scopedAccountId = `org_cpc_off_${suffix}`
+  const scopedAppId = `app_cpc_off_${suffix}`
+  const port = 4180 + Math.floor(Math.random() * 120)
+  const baseUrl = `http://${HOST}:${port}`
+  const gateway = startGateway(port, {
+    CPC_SEMANTICS: 'off',
+  })
+
+  const userQuery = '帮我推荐一个适合做视频配音的 AI 工具套餐'
+  const assistantAnswer = '我可以给你按价格和授权范围做一个对比。'
+
+  try {
+    await waitForGateway(baseUrl)
+
+    const dashboardHeaders = await registerDashboardHeaders(baseUrl, {
+      email: `owner_cpc_off_${suffix}@example.com`,
+      accountId: scopedAccountId,
+      appId: scopedAppId,
+    })
+    const runtimeHeaders = await issueRuntimeApiKeyHeaders(baseUrl, dashboardHeaders, {
+      accountId: scopedAccountId,
+      appId: scopedAppId,
+    })
+
+    const bidPayload = {
+      userId: `user_${suffix}`,
+      chatId: `chat_${suffix}`,
+      messages: [
+        { role: 'user', content: userQuery },
+        { role: 'assistant', content: assistantAnswer },
+      ],
+    }
+
+    const served = await requestServedBid(baseUrl, runtimeHeaders, bidPayload)
+    const winner = served.winner
+    const requestId = String(served.response?.requestId || '').trim()
+    const winnerCpcUsd = Number(winner.pricing?.cpcUsd || 0)
+    const winnerAdId = String(winner.bidId || '').trim()
+    const winnerPlacementId = String(served.response?.diagnostics?.precheck?.placement?.placementId || '').trim()
+
+    assert.equal(Boolean(requestId), true)
+    assert.equal(Number.isFinite(winnerCpcUsd) && winnerCpcUsd > 0, true)
+    assert.equal(String(winner.pricing?.pricingSemanticsVersion || ''), 'cpc_v1')
+    assert.equal(String(winner.pricing?.billingUnit || ''), 'cpc')
+
+    const sdkClick = await requestJson(baseUrl, '/api/v1/sdk/events', {
+      method: 'POST',
+      headers: runtimeHeaders,
+      body: {
+        requestId,
+        appId: scopedAppId,
+        accountId: scopedAccountId,
+        sessionId: bidPayload.chatId,
+        turnId: `turn_${suffix}`,
+        query: userQuery,
+        answerText: assistantAnswer,
+        intentScore: 0.88,
+        locale: 'zh-CN',
+        kind: 'click',
+        adId: winnerAdId,
+        placementId: winnerPlacementId || 'chat_from_answer_v1',
+      },
+    })
+    assert.equal(sdkClick.ok, true, `sdk click event failed: ${JSON.stringify(sdkClick.payload)}`)
+    const sdkRevenue = Number(sdkClick.payload?.revenueUsd || 0)
+    assert.equal(Number.isFinite(sdkRevenue), true)
+    assert.equal(sdkRevenue, winnerCpcUsd)
+  } catch (error) {
+    const logs = gateway.getLogs()
+    const message = error instanceof Error ? error.message : String(error)
+    throw new Error(
+      `[cpc-click-revenue-cpc-off] ${message}\n[gateway stdout]\n${logs.stdout}\n[gateway stderr]\n${logs.stderr}`,
     )
   } finally {
     await stopGateway(gateway)

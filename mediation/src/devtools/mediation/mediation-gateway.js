@@ -285,8 +285,7 @@ const ATTACH_MVP_PLACEMENT_KEY = 'attach.post_answer_render'
 const ATTACH_MVP_EVENT = 'answer_completed'
 const NEXT_STEP_INTENT_CARD_PLACEMENT_KEY = 'next_step.intent_card'
 const V2_BID_EVENT = 'v2_bid_request'
-const LEGACY_PRICING_SEMANTICS_VERSION = 'legacy_ecpm_v0'
-const CPC_SEMANTICS_ENABLED = parseFeatureSwitch(process.env.CPC_SEMANTICS, false)
+const CPC_PRICING_SEMANTICS_VERSION = 'cpc_v1'
 const BUDGET_ENFORCEMENT_MODE = parseEnforcementMode(process.env.BUDGET_ENFORCEMENT, 'off')
 const RISK_ENFORCEMENT_MODE = parseEnforcementMode(process.env.RISK_ENFORCEMENT, 'off')
 const BUDGET_RESERVATION_TTL_MS = 15 * 60 * 1000
@@ -5889,10 +5888,6 @@ function resolveCampaignIdFromBid(bid = {}) {
   return resolveCampaignIdFromMetadata(source.metadata)
 }
 
-function isCpcSemanticsActive() {
-  return CPC_SEMANTICS_ENABLED
-}
-
 function isBudgetEnforced() {
   return BUDGET_ENFORCEMENT_MODE === 'on'
 }
@@ -6890,9 +6885,7 @@ async function recordClickRevenueFactFromBid(payload = {}) {
     clampNumber(
       request.bidPriceUsd
       ?? request.bidPrice
-      ?? (isCpcSemanticsActive()
-        ? pricingSnapshot?.cpcUsd
-        : (pricingSnapshot?.ecpmUsd ?? pricingSnapshot?.cpcUsd)),
+      ?? pricingSnapshot?.cpcUsd,
       0,
       Number.MAX_SAFE_INTEGER,
       0,
@@ -7995,10 +7988,6 @@ async function selectWinnerWithBudgetAndRisk({
       campaignId,
     }
 
-    if (!isCpcSemanticsActive() && Number.isFinite(Number(normalizedBid?.pricing?.ecpmUsd))) {
-      normalizedBid.price = round(clampNumber(normalizedBid.pricing.ecpmUsd, 0, Number.MAX_SAFE_INTEGER, 0), 4)
-    }
-
     const riskDecision = evaluateBidRisk({
       campaignId,
       appId: request.appId,
@@ -8064,18 +8053,29 @@ async function selectWinnerWithBudgetAndRisk({
     }
 
     diagnostics.selectedCampaignId = campaignId
+    const winnerPricing = riskAdjustedBid.pricing && typeof riskAdjustedBid.pricing === 'object'
+      ? {
+          ...riskAdjustedBid.pricing,
+          pricingSemanticsVersion: CPC_PRICING_SEMANTICS_VERSION,
+          billingUnit: 'cpc',
+        }
+      : riskAdjustedBid.pricing
+    const winnerPrice = round(
+      clampNumber(
+        winnerPricing?.cpcUsd ?? riskAdjustedBid?.price,
+        0,
+        Number.MAX_SAFE_INTEGER,
+        0,
+      ),
+      4,
+    )
     return {
       winnerCandidate: candidate,
       winnerBid: {
         ...riskAdjustedBid,
         campaignId,
-        pricing: riskAdjustedBid.pricing && typeof riskAdjustedBid.pricing === 'object'
-          ? {
-              ...riskAdjustedBid.pricing,
-              pricingSemanticsVersion: isCpcSemanticsActive() ? 'cpc_v1' : LEGACY_PRICING_SEMANTICS_VERSION,
-              billingUnit: isCpcSemanticsActive() ? 'cpc' : 'ecpm',
-            }
-          : riskAdjustedBid.pricing,
+        price: winnerPrice,
+        pricing: winnerPricing,
       },
       reasonCode: 'served',
       budgetDecision,
@@ -8481,8 +8481,21 @@ async function evaluateSinglePlacementOpportunity({
             : 'no_fill'
         )
         if (winnerBid) {
-          if (!isCpcSemanticsActive() && Number.isFinite(Number(winnerBid?.pricing?.ecpmUsd))) {
-            winnerBid.price = round(clampNumber(winnerBid.pricing.ecpmUsd, 0, Number.MAX_SAFE_INTEGER, 0), 4)
+          if (winnerBid.pricing && typeof winnerBid.pricing === 'object') {
+            winnerBid.pricing = {
+              ...winnerBid.pricing,
+              pricingSemanticsVersion: CPC_PRICING_SEMANTICS_VERSION,
+              billingUnit: 'cpc',
+            }
+            winnerBid.price = round(
+              clampNumber(
+                winnerBid.pricing.cpcUsd ?? winnerBid.price,
+                0,
+                Number.MAX_SAFE_INTEGER,
+                0,
+              ),
+              4,
+            )
           }
           const winnerCampaignId = resolveCampaignIdFromBid(winnerBid)
           if (winnerCampaignId) {
@@ -8532,10 +8545,7 @@ async function evaluateSinglePlacementOpportunity({
     ? winnerBid.pricing
     : null
   const pricingVersion = String(pricingSnapshot?.modelVersion || rankingDebug?.pricingModel || 'cpa_mock_v2').trim()
-  const pricingSemanticsVersion = String(
-    pricingSnapshot?.pricingSemanticsVersion
-    || (isCpcSemanticsActive() ? 'cpc_v1' : LEGACY_PRICING_SEMANTICS_VERSION),
-  ).trim() || (isCpcSemanticsActive() ? 'cpc_v1' : LEGACY_PRICING_SEMANTICS_VERSION)
+  const pricingSemanticsVersion = CPC_PRICING_SEMANTICS_VERSION
   const deliveryStartedAt = Date.now()
 
   await writer.writeDeliveryRecord({
@@ -8846,11 +8856,7 @@ async function evaluateV2BidOpportunityFirst(payload) {
     || rankingDebug?.pricingModel
     || 'cpa_mock_v2',
   ).trim()
-  const pricingSemanticsVersion = String(
-    selectedPlacementResult?.pricingSemanticsVersion
-    || pricingSnapshot?.pricingSemanticsVersion
-    || (isCpcSemanticsActive() ? 'cpc_v1' : LEGACY_PRICING_SEMANTICS_VERSION),
-  ).trim() || (isCpcSemanticsActive() ? 'cpc_v1' : LEGACY_PRICING_SEMANTICS_VERSION)
+  const pricingSemanticsVersion = CPC_PRICING_SEMANTICS_VERSION
   const intentThreshold = clampNumber(selectedPlacementResult?.intentThreshold, 0, 1, 0.6)
   const budgetDecision = selectedPlacementResult?.budgetDecision && typeof selectedPlacementResult.budgetDecision === 'object'
     ? selectedPlacementResult.budgetDecision

@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+
 import { normalizeUnifiedOffer } from './unified-offer.js'
 
 function pickFirst(...values) {
@@ -16,6 +18,75 @@ function normalizeMaybeUrl(...values) {
     return `https://${text}`
   }
   return ''
+}
+
+function hashId(seed = '', length = 12) {
+  return createHash('sha256').update(String(seed)).digest('hex').slice(0, length)
+}
+
+function slugifyKey(value = '', fallback = 'unknown') {
+  const normalized = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+  if (!normalized) return fallback
+  return normalized.slice(0, 48)
+}
+
+function resolveHostnameFromUrl(raw = '') {
+  const text = String(raw || '').trim()
+  if (!text) return ''
+  const candidate = /^https?:\/\//i.test(text) ? text : `https://${text}`
+  try {
+    const hostname = String(new URL(candidate).hostname || '').trim().toLowerCase()
+    if (!hostname) return ''
+    return hostname.replace(/^www\./, '')
+  } catch {
+    return ''
+  }
+}
+
+export function derivePartnerStackCampaignId(record = {}) {
+  const partnershipKey = pickFirst(record?.key, record?.id, record?.company?.key, record?.company?.id)
+  if (partnershipKey) {
+    return `campaign_partnerstack_${slugifyKey(partnershipKey)}`
+  }
+
+  const destination = pickFirst(
+    record?.link?.destination,
+    record?.link?.url,
+    record?.destination_url,
+    record?.destinationUrl,
+    record?.url,
+  )
+  const seed = [
+    pickFirst(record?.name, record?.title, record?.company?.name),
+    destination,
+    pickFirst(record?.stackKey, record?.link?.stack_key),
+  ].join('|')
+  return `campaign_partnerstack_${hashId(seed, 12)}`
+}
+
+export function derivePartnerStackBrandId(record = {}) {
+  const destination = pickFirst(
+    record?.link?.destination,
+    record?.destination_url,
+    record?.destinationUrl,
+    record?.url,
+    record?.link?.url,
+  )
+  const hostname = resolveHostnameFromUrl(destination)
+  if (hostname) {
+    return `brand_partnerstack_${slugifyKey(hostname)}`
+  }
+
+  const seed = [
+    pickFirst(record?.key, record?.id, record?.company?.key, record?.company?.id),
+    pickFirst(record?.name, record?.title, record?.company?.name),
+    destination,
+  ].join('|')
+  return `brand_partnerstack_${hashId(seed, 12)}`
 }
 
 function pickPartnerStackImageUrl(record = {}) {
@@ -100,6 +171,8 @@ export function mapPartnerStackPartnershipToUnifiedOffer(record, options = {}) {
   const sourceType = options.sourceType || 'link'
   const sourceId = pickFirst(record?.key, record?.id, record?.company?.key, record?.company?.id)
   const imageUrl = pickPartnerStackImageUrl(record)
+  const campaignId = derivePartnerStackCampaignId(record)
+  const brandId = derivePartnerStackBrandId(record)
 
   return normalizeUnifiedOffer({
     sourceNetwork: 'partnerstack',
@@ -136,6 +209,8 @@ export function mapPartnerStackPartnershipToUnifiedOffer(record, options = {}) {
       stackKey: pickFirst(record?.link?.stack_key),
       destinationUrl: normalizeMaybeUrl(record?.link?.destination),
       teamName: pickFirst(record?.team?.name),
+      campaignId,
+      brandId,
       image_url: imageUrl,
       imageUrl,
     },
