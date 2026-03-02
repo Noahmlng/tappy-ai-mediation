@@ -9,6 +9,8 @@ const BM25_STOPWORDS = new Set([
   'why', 'i', 'me', 'my', 'mine', 'we', 'our', 'ours', 'he', 'him', 'his', 'she', 'her', 'hers', 'they', 'them',
   'wants', 'want', 'need', 'needs', 'girlfriend', 'boyfriend', 'wife', 'husband', 'partner',
   'tool', 'tools', 'platform', 'platforms', 'solution', 'solutions', 'service', 'services',
+  'category', 'categories', 'automated', 'easiest', 'easy', 'recommended', 'approach', 'approaches', 'method', 'methods',
+  'breakdown', 'all', 'one', 'workflow', 'step', 'steps',
   '推荐', '比较', '对比', '价格', '优惠', '什么', '怎么', '可以', '帮我', '一下',
 ])
 

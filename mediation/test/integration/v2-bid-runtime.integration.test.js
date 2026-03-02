@@ -754,3 +754,140 @@ test('v2 bid runtime: brand token match handles spaced names like Eleven Labs', 
   assert.equal(result.candidates[0].brandEntityHitCount > 0, true)
   assert.equal(result.candidates.some((item) => item.offerId === 'house:offer:ghost'), true)
 })
+
+test('v2 bid runtime: brand intent with zero brand hits blocks off-topic fill', async () => {
+  const pool = {
+    async query(sql) {
+      if (String(sql).includes('offer_inventory_serving_snapshot')) {
+        return {
+          rows: [
+            makeServingSnapshotRow({
+              offerId: 'house:offer:ghost',
+              network: 'house',
+              title: 'Ghostery developer tools Essential Pick',
+              description: 'General developer productivity suite.',
+              targetUrl: 'https://house.example.com/ghostery',
+            }),
+            makeServingSnapshotRow({
+              offerId: 'partnerstack:sales:generic',
+              network: 'partnerstack',
+              title: 'Generic Sales Automation',
+              description: 'Automate lead discovery and outreach.',
+              targetUrl: 'https://partner.example.com/generic-sales',
+            }),
+          ],
+        }
+      }
+      return {
+        rows: [
+          makeInventoryRow({
+            offerId: 'house:offer:ghost',
+            network: 'house',
+            title: 'Ghostery developer tools Essential Pick',
+            description: 'General developer productivity suite.',
+            targetUrl: 'https://house.example.com/ghostery',
+            vectorScore: 0.88,
+          }),
+          makeInventoryRow({
+            offerId: 'partnerstack:sales:generic',
+            network: 'partnerstack',
+            title: 'Generic Sales Automation',
+            description: 'Automate lead discovery and outreach.',
+            targetUrl: 'https://partner.example.com/generic-sales',
+            vectorScore: 0.81,
+          }),
+        ],
+      }
+    },
+  }
+
+  const result = await retrieveOpportunityCandidates({
+    query: 'recommend AI tools for chinese to english youtube dubbing',
+    semanticQuery: 'recommend AI tools for chinese to english youtube dubbing',
+    sparseQuery: 'recommend AI tools for chinese to english youtube dubbing murf elevenlabs',
+    topicQuery: 'recommend AI tools for chinese to english youtube dubbing',
+    brandEntityTokens: ['murf', 'elevenlabs'],
+    queryMode: 'latest_user_plus_entities',
+    contextWindowMode: 'latest_turn_only',
+    assistantEntityTokensRaw: ['murf', 'elevenlabs', 'category', 'automated'],
+    assistantEntityTokensFiltered: ['murf', 'elevenlabs'],
+    filters: {
+      networks: ['partnerstack', 'house'],
+      market: 'US',
+      language: 'en-US',
+    },
+    lexicalTopK: 20,
+    vectorTopK: 20,
+    finalTopK: 10,
+  }, {
+    pool,
+  })
+
+  assert.equal(result.debug?.brandIntentDetected, true)
+  assert.equal(result.debug?.brandIntentBlockedNoHit, true)
+  assert.equal(result.candidates.length, 0)
+})
+
+test('v2 bid runtime: retrieval debug exposes latest-turn context and topic coverage scores', async () => {
+  const pool = {
+    async query(sql) {
+      if (String(sql).includes('offer_inventory_serving_snapshot')) {
+        return {
+          rows: [
+            makeServingSnapshotRow({
+              offerId: 'partnerstack:voice:murf',
+              network: 'partnerstack',
+              title: 'Murf AI Voice Dubbing',
+              description: 'Translate chinese creator videos into english voice tracks.',
+              targetUrl: 'https://partner.example.com/murf',
+              metadata: {
+                brand: 'Murf',
+                merchant: 'Murf',
+              },
+            }),
+          ],
+        }
+      }
+      return {
+        rows: [
+          makeInventoryRow({
+            offerId: 'partnerstack:voice:murf',
+            network: 'partnerstack',
+            title: 'Murf AI Voice Dubbing',
+            description: 'Translate chinese creator videos into english voice tracks.',
+            targetUrl: 'https://partner.example.com/murf',
+            vectorScore: 0.62,
+          }),
+        ],
+      }
+    },
+  }
+
+  const result = await retrieveOpportunityCandidates({
+    query: 'tools to dub chinese youtube videos into english',
+    semanticQuery: 'tools to dub chinese youtube videos into english',
+    sparseQuery: 'dubbing chinese english youtube murf',
+    topicQuery: 'tools to dub chinese youtube videos into english',
+    queryMode: 'latest_user_plus_entities',
+    contextWindowMode: 'latest_turn_only',
+    assistantEntityTokensRaw: ['murf', 'category', 'automated'],
+    assistantEntityTokensFiltered: ['murf'],
+    filters: {
+      networks: ['partnerstack'],
+      market: 'US',
+      language: 'en-US',
+    },
+    lexicalTopK: 10,
+    vectorTopK: 10,
+    finalTopK: 10,
+  }, {
+    pool,
+  })
+
+  assert.equal(result.debug?.contextWindowMode, 'latest_turn_only')
+  assert.deepEqual(result.debug?.assistantEntityTokensRaw, ['murf', 'category', 'automated'])
+  assert.deepEqual(result.debug?.assistantEntityTokensFiltered, ['murf'])
+  assert.equal(Array.isArray(result.debug?.options), true)
+  assert.equal(typeof result.debug?.options?.[0]?.topicCoverageScore, 'number')
+  assert.equal(typeof result.candidates?.[0]?.topicCoverageScore, 'number')
+})

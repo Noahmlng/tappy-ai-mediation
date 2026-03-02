@@ -173,7 +173,7 @@ export function loadRuntimeConfig(env = process.env, options = {}) {
       ),
       sparseQueryMaxTokens: toPositiveInteger(
         readEnv(env, 'MEDIATION_RETRIEVAL_SPARSE_QUERY_MAX_TOKENS', { required: false }),
-        24,
+        18,
       ),
       assistantEntityMaxCount: toPositiveInteger(
         readEnv(env, 'MEDIATION_RETRIEVAL_ASSISTANT_ENTITY_MAX_COUNT', { required: false }),

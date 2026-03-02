@@ -16,12 +16,19 @@ const DEFAULT_HYBRID_DENSE_WEIGHT = 0.35
 const DEFAULT_BM25_REFRESH_INTERVAL_MS = 10 * 60 * 1000
 const DEFAULT_BRAND_MISS_PENALTY = 0.08
 const DEFAULT_HOUSE_SHARE_CAP = 0.6
+const DEFAULT_TOPIC_COVERAGE_THRESHOLD = 0.1
+const DEFAULT_HOUSE_BRAND_MISS_MIN_PENALTY = 0.18
+const DEFAULT_HOUSE_BRAND_MISS_DYNAMIC_RATIO = 0.45
+const DEFAULT_HOUSE_BRAND_MISS_MAX_PENALTY = 0.65
+const DEFAULT_PARTNER_BRAND_MISS_PENALTY = 0.08
 const BRAND_ENTITY_STOPWORDS = new Set([
   'the', 'and', 'for', 'with', 'from', 'that', 'this', 'those', 'these', 'have', 'will', 'your', 'about', 'which',
   'what', 'when', 'where', 'who', 'how', 'why', 'would', 'could', 'should', 'very', 'more', 'most',
   'best', 'better', 'recommend', 'recommendation', 'recommendations', 'compare', 'comparison', 'price', 'prices',
   'pricing', 'deal', 'deals', 'tool', 'tools', 'platform', 'platforms', 'software', 'service', 'services',
   'please', 'thanks',
+  'category', 'categories', 'automated', 'easiest', 'easy', 'recommended', 'approach', 'approaches', 'method', 'methods',
+  'breakdown', 'all', 'one',
   '推荐', '比较', '对比', '价格', '优惠', '什么', '怎么', '可以', '帮我', '一下',
 ])
 
@@ -260,7 +267,7 @@ function applyBrandIntentProtection(candidates = [], policy = {}) {
   const finalTopK = toPositiveInteger(policy.finalTopK, DEFAULT_FINAL_TOP_K)
   const brandEntityTokens = normalizeBrandEntityTokens(policy.brandEntityTokens)
   const brandIntentDetected = brandEntityTokens.length > 0
-  const penaltyValue = clamp01(policy.brandMissPenalty, DEFAULT_BRAND_MISS_PENALTY)
+  const partnerBrandMissPenalty = clamp01(policy.brandMissPenalty, DEFAULT_PARTNER_BRAND_MISS_PENALTY)
   const houseShareCap = clamp01(policy.houseShareCap, DEFAULT_HOUSE_SHARE_CAP)
   const brandTokenSet = new Set(brandEntityTokens)
   const penaltiesApplied = []
@@ -291,23 +298,33 @@ function applyBrandIntentProtection(candidates = [], policy = {}) {
       penaltiesApplied,
       houseShareBeforeCap: computeHouseShare(withBrandHits, finalTopK),
       houseShareAfterCap: computeHouseShare(withBrandHits, finalTopK),
+      brandIntentBlockedNoHit: false,
     }
   }
 
   const penalized = withBrandHits.map((candidate) => {
     const network = cleanText(candidate?.network).toLowerCase()
-    if (network !== 'house' || candidate.brandEntityHitCount > 0) {
+    if (candidate.brandEntityHitCount > 0) {
       return candidate
     }
-    const dynamicPenalty = Math.max(
-      penaltyValue,
-      toFiniteNumber(candidate?.fusedScore, 0) * 0.35,
-    )
-    const penaltyApplied = round(Math.min(0.6, dynamicPenalty))
+    let penaltyApplied = 0
+    let penaltyType = ''
+    if (network === 'house') {
+      const dynamicPenalty = Math.max(
+        DEFAULT_HOUSE_BRAND_MISS_MIN_PENALTY,
+        toFiniteNumber(candidate?.fusedScore, 0) * DEFAULT_HOUSE_BRAND_MISS_DYNAMIC_RATIO,
+      )
+      penaltyApplied = round(Math.min(DEFAULT_HOUSE_BRAND_MISS_MAX_PENALTY, dynamicPenalty))
+      penaltyType = 'house_brand_miss_penalty'
+    } else if (network === 'partnerstack' || network === 'cj') {
+      penaltyApplied = round(Math.max(DEFAULT_PARTNER_BRAND_MISS_PENALTY, partnerBrandMissPenalty))
+      penaltyType = `${network}_brand_miss_penalty`
+    }
+    if (penaltyApplied <= 0) return candidate
     const nextFusedScore = round(Math.max(0, toFiniteNumber(candidate?.fusedScore, 0) - penaltyApplied))
     penaltiesApplied.push({
       offerId: cleanText(candidate?.offerId),
-      type: 'house_brand_miss_penalty',
+      type: penaltyType || 'brand_miss_penalty',
       amount: penaltyApplied,
     })
     return {
@@ -319,11 +336,25 @@ function applyBrandIntentProtection(candidates = [], policy = {}) {
 
   const sorted = [...penalized].sort(compareHybridCandidates)
   const houseShareBeforeCap = computeHouseShare(sorted, finalTopK)
-  const hasPartnerstackCandidate = sorted.some((candidate) => (
+  const hasBrandHitCandidate = sorted.some((candidate) => toPositiveInteger(candidate?.brandEntityHitCount, 0) > 0)
+  if (!hasBrandHitCandidate) {
+    return {
+      candidates: [],
+      brandIntentDetected,
+      brandEntityTokens,
+      penaltiesApplied,
+      houseShareBeforeCap,
+      houseShareAfterCap: 0,
+      brandIntentBlockedNoHit: true,
+    }
+  }
+
+  const hasPartnerstackBrandHit = sorted.some((candidate) => (
     cleanText(candidate?.network).toLowerCase() === 'partnerstack'
+    && toPositiveInteger(candidate?.brandEntityHitCount, 0) > 0
   ))
 
-  if (!hasPartnerstackCandidate) {
+  if (!hasPartnerstackBrandHit) {
     return {
       candidates: sorted,
       brandIntentDetected,
@@ -331,6 +362,7 @@ function applyBrandIntentProtection(candidates = [], policy = {}) {
       penaltiesApplied,
       houseShareBeforeCap,
       houseShareAfterCap: computeHouseShare(sorted, finalTopK),
+      brandIntentBlockedNoHit: false,
     }
   }
 
@@ -360,6 +392,7 @@ function applyBrandIntentProtection(candidates = [], policy = {}) {
     penaltiesApplied,
     houseShareBeforeCap,
     houseShareAfterCap: computeHouseShare(reshuffled, finalTopK),
+    brandIntentBlockedNoHit: false,
   }
 }
 
@@ -368,6 +401,12 @@ function tokenize(value = '') {
     .toLowerCase()
     .split(/[^a-z0-9\u4e00-\u9fff]+/g)
     .filter((item) => item.length >= 2)
+}
+
+function tokenizeTopic(value = '') {
+  return tokenize(value)
+    .filter((token) => token.length >= 3)
+    .filter((token) => !BRAND_ENTITY_STOPWORDS.has(token))
 }
 
 function overlapScore(queryTokens = [], candidateTokens = []) {
@@ -380,6 +419,28 @@ function overlapScore(queryTokens = [], candidateTokens = []) {
     if (candidateSet.has(token)) hit += 1
   }
   return hit / querySet.size
+}
+
+function computeTopicCoverageScore(candidate = {}, queryTokens = []) {
+  if (!Array.isArray(queryTokens) || queryTokens.length <= 0) return 0
+  const metadata = candidate?.metadata && typeof candidate.metadata === 'object' ? candidate.metadata : {}
+  const tags = Array.isArray(candidate?.tags) ? candidate.tags : []
+  const corpus = [
+    candidate?.title,
+    candidate?.description,
+    metadata.brand,
+    metadata.brandName,
+    metadata.brand_name,
+    metadata.merchant,
+    metadata.merchantName,
+    metadata.merchant_name,
+    ...tags,
+  ]
+    .map((item) => String(item || '').trim())
+    .filter(Boolean)
+    .join(' ')
+  const candidateTokens = tokenizeTopic(corpus)
+  return round(overlapScore(queryTokens, candidateTokens))
 }
 
 function normalizeQuality(value) {
@@ -716,6 +777,27 @@ function applyHybridLinearFusion(candidates = [], policy = {}) {
   }
 }
 
+function buildDebugOptions(candidates = [], options = {}) {
+  const limit = Math.max(1, toPositiveInteger(options.limit, 20))
+  return (Array.isArray(candidates) ? candidates : [])
+    .slice(0, limit)
+    .map((candidate) => ({
+      offerId: cleanText(candidate?.offerId),
+      network: cleanText(candidate?.network).toLowerCase(),
+      lexicalScore: round(toFiniteNumber(candidate?.lexicalScore, 0)),
+      bm25Raw: round(toFiniteNumber(candidate?.bm25Raw, 0)),
+      vectorScore: round(toFiniteNumber(candidate?.vectorScore, 0)),
+      fusedScore: round(toFiniteNumber(candidate?.fusedScore, 0)),
+      sparseScoreNormalized: round(toFiniteNumber(candidate?.sparseScoreNormalized, 0)),
+      denseScoreNormalized: round(toFiniteNumber(candidate?.denseScoreNormalized, 0)),
+      rrfScore: round(toFiniteNumber(candidate?.rrfScore, 0)),
+      topicCoverageScore: round(toFiniteNumber(candidate?.topicCoverageScore, 0)),
+      brandEntityHitCount: toPositiveInteger(candidate?.brandEntityHitCount, 0),
+      penaltyApplied: round(toFiniteNumber(candidate?.penaltyApplied, 0)),
+      eliminationReason: cleanText(candidate?.eliminationReason),
+    }))
+}
+
 function normalizeHybridStrategy(value) {
   const strategy = cleanText(value).toLowerCase()
   if (!strategy) return DEFAULT_HYBRID_STRATEGY
@@ -728,8 +810,18 @@ export async function retrieveOpportunityCandidates(input = {}, options = {}) {
   const query = cleanText(input.query)
   const semanticQuery = cleanText(input.semanticQuery || input.vectorQuery || query)
   const sparseQuery = cleanText(input.sparseQuery || input.lexicalQuery || query || semanticQuery)
+  const topicQuery = cleanText(input.topicQuery || semanticQuery || query || sparseQuery)
+  const topicCoverageThreshold = clamp01(input.topicCoverageThreshold, DEFAULT_TOPIC_COVERAGE_THRESHOLD)
+  const topicSignalTokens = tokenizeTopic(topicQuery)
   const queryForFallback = sparseQuery || semanticQuery || query
   const queryMode = cleanText(input.queryMode).toLowerCase() || 'raw_query'
+  const contextWindowMode = cleanText(input.contextWindowMode).toLowerCase() || 'latest_turn_only'
+  const assistantEntityTokensRaw = Array.isArray(input.assistantEntityTokensRaw)
+    ? input.assistantEntityTokensRaw.map((item) => cleanText(item).toLowerCase()).filter(Boolean)
+    : []
+  const assistantEntityTokensFiltered = Array.isArray(input.assistantEntityTokensFiltered)
+    ? input.assistantEntityTokensFiltered.map((item) => cleanText(item).toLowerCase()).filter(Boolean)
+    : []
   const filters = normalizeFilters(input.filters)
   const languageMatchMode = normalizeLocaleMatchMode(input.languageMatchMode)
   const languageResolved = resolveLanguageFilter(filters.language, languageMatchMode)
@@ -779,6 +871,11 @@ export async function retrieveOpportunityCandidates(input = {}, options = {}) {
     queryUsed: sparseQuery || semanticQuery,
     semanticQuery,
     sparseQuery,
+    topicQuery,
+    topicCoverageThreshold,
+    contextWindowMode,
+    assistantEntityTokensRaw,
+    assistantEntityTokensFiltered,
     languageMatchMode,
     languageResolved,
     fusionWeights: {
@@ -801,6 +898,8 @@ export async function retrieveOpportunityCandidates(input = {}, options = {}) {
     penaltiesApplied: [],
     houseShareBeforeCap: 0,
     houseShareAfterCap: 0,
+    brandIntentBlockedNoHit: false,
+    options: [],
     ...baseDebug,
     ...overrides,
     retrievalMs: Math.max(0, Date.now() - startedAt),
@@ -843,7 +942,11 @@ export async function retrieveOpportunityCandidates(input = {}, options = {}) {
           houseShareCap,
           finalTopK,
         })
-        const sliced = brandProtected.candidates.slice(0, finalTopK)
+        const withTopicCoverage = brandProtected.candidates.map((candidate) => ({
+          ...candidate,
+          topicCoverageScore: computeTopicCoverageScore(candidate, topicSignalTokens),
+        }))
+        const sliced = withTopicCoverage.slice(0, finalTopK)
         if (sliced.length > 0) {
           return {
             candidates: sliced,
@@ -867,6 +970,8 @@ export async function retrieveOpportunityCandidates(input = {}, options = {}) {
               penaltiesApplied: brandProtected.penaltiesApplied,
               houseShareBeforeCap: brandProtected.houseShareBeforeCap,
               houseShareAfterCap: brandProtected.houseShareAfterCap,
+              brandIntentBlockedNoHit: brandProtected.brandIntentBlockedNoHit,
+              options: buildDebugOptions(withTopicCoverage, { limit: finalTopK }),
               mode: String(fallbackResult?.debug?.mode || 'connector_live_fallback'),
               fallbackMeta: fallbackResult?.debug && typeof fallbackResult.debug === 'object'
                 ? fallbackResult.debug
@@ -886,6 +991,8 @@ export async function retrieveOpportunityCandidates(input = {}, options = {}) {
             penaltiesApplied: brandProtected.penaltiesApplied,
             houseShareBeforeCap: brandProtected.houseShareBeforeCap,
             houseShareAfterCap: brandProtected.houseShareAfterCap,
+            brandIntentBlockedNoHit: brandProtected.brandIntentBlockedNoHit,
+            options: buildDebugOptions(withTopicCoverage, { limit: finalTopK }),
             mode: String(fallbackResult?.debug?.mode || 'connector_live_fallback_empty'),
             fallbackMeta: fallbackResult?.debug && typeof fallbackResult.debug === 'object'
               ? fallbackResult.debug
@@ -937,7 +1044,11 @@ export async function retrieveOpportunityCandidates(input = {}, options = {}) {
     houseShareCap,
     finalTopK,
   })
-  const sliced = brandProtected.candidates.slice(0, finalTopK)
+  const withTopicCoverage = brandProtected.candidates.map((candidate) => ({
+    ...candidate,
+    topicCoverageScore: computeTopicCoverageScore(candidate, topicSignalTokens),
+  }))
+  const sliced = withTopicCoverage.slice(0, finalTopK)
 
   return {
     candidates: sliced,
@@ -955,6 +1066,8 @@ export async function retrieveOpportunityCandidates(input = {}, options = {}) {
       penaltiesApplied: brandProtected.penaltiesApplied,
       houseShareBeforeCap: brandProtected.houseShareBeforeCap,
       houseShareAfterCap: brandProtected.houseShareAfterCap,
+      brandIntentBlockedNoHit: brandProtected.brandIntentBlockedNoHit,
+      options: buildDebugOptions(withTopicCoverage, { limit: finalTopK }),
     }),
   }
 }

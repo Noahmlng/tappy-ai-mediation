@@ -330,6 +330,8 @@ const RETRIEVAL_ASSISTANT_ENTITY_STOPWORDS = new Set([
   'language', 'languages', 'quality', 'creator', 'creators', 'content', 'market', 'leader', 'free', 'trial', 'paid',
   'option', 'options', 'step', 'steps', 'core', 'difference', 'gold', 'standard', 'model', 'models', 'all', 'one',
   'platform', 'platforms', 'tool', 'tools', 'solution', 'solutions', 'app', 'apps',
+  'category', 'categories', 'automated', 'easiest', 'easy', 'recommended', 'approach', 'approaches', 'method', 'methods',
+  'breakdown', 'best', 'top', 'tier',
   'assistant',
   '人工', '智能', '视频', '翻译', '配音', '工具', '平台', '方案',
 ])
@@ -7629,47 +7631,130 @@ function isAssistantEntityToken(token = '') {
   return true
 }
 
-function extractAssistantEntityTokens(recentTurns = [], options = {}) {
-  const maxCount = Math.max(1, toPositiveInteger(options.maxCount, 16))
-  const rows = Array.isArray(recentTurns) ? recentTurns : []
-  if (rows.length <= 0) return []
+function normalizeAssistantEntityPhrase(value = '') {
+  return String(value || '')
+    .trim()
+    .replace(/^[-*•\d).(:\s]+/g, '')
+    .replace(/[:;,]+$/g, '')
+    .replace(/^["'`]+|["'`]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
 
-  const dedupe = new Set()
-  const entities = []
-  const ordered = [...rows]
-    .filter((row) => row?.role === 'assistant')
-    .reverse()
+function isAssistantEntityPhrase(phrase = '', options = {}) {
+  const normalized = normalizeAssistantEntityPhrase(phrase)
+  if (!normalized) return false
+  if (normalized.length < 3 || normalized.length > 32) return false
+  const lower = normalized.toLowerCase()
+  if (RETRIEVAL_ASSISTANT_ENTITY_STOPWORDS.has(lower)) return false
+  if (/^\d+$/.test(lower)) return false
+  const words = lower.split(/\s+/g).filter(Boolean)
+  if (words.length <= 0 || words.length > 4) return false
+  if (RETRIEVAL_ASSISTANT_ENTITY_STOPWORDS.has(words[0])) return false
+  if (words.every((word) => RETRIEVAL_ASSISTANT_ENTITY_STOPWORDS.has(word))) return false
+  const entityLike = Boolean(options.aliasSignal)
+    || /[A-Z]/.test(normalized)
+    || /[.\-+&]/.test(normalized)
+    || words.some((word) => /[0-9]/.test(word))
+  if (!entityLike) return false
+  return true
+}
 
-  for (const row of ordered) {
-    const content = String(row?.content || '')
-    if (!content) continue
-
-    const strongMatches = [...content.matchAll(/\*\*([^*]{2,80})\*\*/g)]
-    for (const match of strongMatches) {
-      const chunk = String(match?.[1] || '').trim()
-      if (!chunk) continue
-      const tokens = tokenizeRetrievalText(chunk)
-      for (const token of tokens) {
-        if (!isAssistantEntityToken(token)) continue
-        if (dedupe.has(token)) continue
-        dedupe.add(token)
-        entities.push(token)
-        if (entities.length >= maxCount) return entities
-      }
-    }
-
-    const camelCaseMatches = content.match(/\b[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+\b/g) || []
-    for (const raw of camelCaseMatches) {
-      const token = String(raw || '').trim().toLowerCase()
-      if (!isAssistantEntityToken(token)) continue
-      if (dedupe.has(token)) continue
-      dedupe.add(token)
-      entities.push(token)
-      if (entities.length >= maxCount) return entities
+function collectAssistantEntityCandidates(content = '') {
+  const text = String(content || '')
+  if (!text) return []
+  const candidates = []
+  const pushCandidate = (value, aliasSignal = false) => {
+    const normalized = normalizeAssistantEntityPhrase(value)
+    if (!normalized) return
+    candidates.push({
+      value: normalized,
+      aliasSignal: Boolean(aliasSignal),
+    })
+  }
+  const pushSplitCandidates = (value, aliasSignal = false) => {
+    const source = String(value || '').trim()
+    if (!source) return
+    const parts = source.split(/[\/|,;]/g)
+    for (const part of parts) {
+      pushCandidate(part, aliasSignal)
     }
   }
 
-  return entities
+  const strongMatches = [...text.matchAll(/\*\*([^*]{2,96})\*\*/g)]
+  for (const match of strongMatches) {
+    const chunk = String(match?.[1] || '').trim()
+    if (!chunk) continue
+    pushSplitCandidates(chunk, false)
+    const aliasMatches = [...chunk.matchAll(/([A-Za-z][A-Za-z0-9.+\- ]{1,40})\s*\(([^)]{2,40})\)/g)]
+    for (const aliasMatch of aliasMatches) {
+      pushCandidate(aliasMatch?.[1], true)
+      pushCandidate(aliasMatch?.[2], true)
+    }
+  }
+
+  const slashPairs = [...text.matchAll(/([A-Za-z][A-Za-z0-9.+\- ]{1,40})\s*\/\s*([A-Za-z][A-Za-z0-9.+\- ]{1,40})/g)]
+  for (const match of slashPairs) {
+    pushCandidate(match?.[1], false)
+    pushCandidate(match?.[2], false)
+  }
+
+  const aliasPairs = [...text.matchAll(/([A-Za-z][A-Za-z0-9.+\- ]{1,40})\s*\(([^)]{2,40})\)/g)]
+  for (const match of aliasPairs) {
+    pushCandidate(match?.[1], true)
+    pushCandidate(match?.[2], true)
+  }
+
+  const domainMatches = text.match(/\b[A-Za-z0-9-]+\.[A-Za-z]{2,}\b/g) || []
+  for (const domain of domainMatches) {
+    pushCandidate(domain, false)
+  }
+
+  const camelCaseMatches = text.match(/\b[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+\b/g) || []
+  for (const raw of camelCaseMatches) {
+    pushCandidate(raw, false)
+  }
+
+  return candidates
+}
+
+function extractAssistantEntityTokens(assistantText = '', options = {}) {
+  const maxCount = Math.max(1, toPositiveInteger(options.maxCount, 16))
+  const candidates = collectAssistantEntityCandidates(assistantText)
+  if (candidates.length <= 0) {
+    return {
+      rawTokens: [],
+      filteredTokens: [],
+    }
+  }
+
+  const rawDedupe = new Set()
+  const rawTokens = []
+  const filteredDedupe = new Set()
+  const filteredTokens = []
+
+  for (const candidate of candidates) {
+    const normalized = normalizeAssistantEntityPhrase(candidate?.value)
+    if (!normalized) continue
+    const normalizedLower = normalized.toLowerCase()
+    if (!rawDedupe.has(normalizedLower)) {
+      rawDedupe.add(normalizedLower)
+      rawTokens.push(normalizedLower)
+    }
+    if (!isAssistantEntityPhrase(normalized, { aliasSignal: candidate?.aliasSignal })) continue
+    if (!isAssistantEntityToken(normalizedLower)) continue
+    if (filteredDedupe.has(normalizedLower)) continue
+    filteredDedupe.add(normalizedLower)
+    filteredTokens.push(normalizedLower)
+    if (filteredTokens.length >= maxCount) {
+      break
+    }
+  }
+
+  return {
+    rawTokens,
+    filteredTokens,
+  }
 }
 
 function buildRetrievalQuery(primaryQuery = '', entities = [], options = {}) {
@@ -7713,62 +7798,59 @@ function deriveBidMessageContext(messages = [], options = {}) {
       timestamp: String(row?.timestamp || '').trim(),
     }))
     .filter((row) => row.content && V2_BID_MESSAGE_ROLES.has(row.role))
-  const recentTurns = normalized.slice(-12)
-  let query = ''
-  let answerText = ''
-  let latestUserQuery = ''
-  const recentUserTurns = recentTurns
-    .filter((row) => row.role === 'user')
-    .slice(-3)
-    .map((row) => row.content)
-  const recentAssistantTurns = recentTurns
-    .filter((row) => row.role === 'assistant')
-    .slice(-3)
-    .map((row) => row.content)
-
-  if (recentUserTurns.length > 0) {
-    query = recentUserTurns.join(' ').trim()
-    latestUserQuery = recentUserTurns[recentUserTurns.length - 1]
-  }
-  if (recentAssistantTurns.length > 0) {
-    answerText = recentAssistantTurns.join(' ').trim()
-  }
-
-  if (!query || !answerText) {
-    for (let index = recentTurns.length - 1; index >= 0; index -= 1) {
-      const row = recentTurns[index]
-      if (!query && row.role === 'user') query = row.content
-      if (!latestUserQuery && row.role === 'user') latestUserQuery = row.content
-      if (!answerText && row.role === 'assistant') answerText = row.content
-      if (query && answerText) break
+  let latestUserRow = null
+  let latestUserIndex = -1
+  for (let index = normalized.length - 1; index >= 0; index -= 1) {
+    if (normalized[index]?.role === 'user') {
+      latestUserRow = normalized[index]
+      latestUserIndex = index
+      break
     }
   }
 
-  const retrievalEntities = extractRetrievalEntitiesFromTurns(recentTurns, {
-    maxCount: 12,
-  })
-  const assistantEntityTokens = extractAssistantEntityTokens(recentTurns, {
+  let latestAssistantRow = null
+  if (latestUserIndex >= 0) {
+    for (let index = latestUserIndex + 1; index < normalized.length; index += 1) {
+      if (normalized[index]?.role === 'assistant') {
+        latestAssistantRow = normalized[index]
+      }
+    }
+  }
+
+  const query = clipText(latestUserRow?.content || '', 1200)
+  const answerText = clipText(latestAssistantRow?.content || '', 1200)
+  const latestUserQuery = query
+  const recentTurns = [latestUserRow, latestAssistantRow].filter(Boolean)
+  const retrievalEntities = Array.from(new Set(
+    tokenizeRetrievalText(latestUserQuery).filter((token) => isRetrievalEntityToken(token)),
+  )).slice(0, 12)
+  const assistantEntityExtraction = extractAssistantEntityTokens(answerText, {
     maxCount: Math.max(1, toPositiveInteger(options.assistantEntityMaxCount, 16)),
   })
+  const assistantEntityTokensRaw = assistantEntityExtraction.rawTokens
+  const assistantEntityTokensFiltered = assistantEntityExtraction.filteredTokens
   const semanticQuery = clipText(latestUserQuery || query, 1200)
   const sparseQuery = buildRetrievalQuery(
     semanticQuery,
-    [...assistantEntityTokens, ...retrievalEntities],
+    [...assistantEntityTokensFiltered, ...retrievalEntities],
     {
-      maxEntityTokens: Math.max(1, toPositiveInteger(options.sparseQueryMaxTokens, 24)),
+      maxEntityTokens: Math.max(1, toPositiveInteger(options.sparseQueryMaxTokens, 18)),
     },
   )
   const retrievalQuery = sparseQuery
   const localeHint = detectLocaleHintFromText(`${query} ${answerText}`)
   return {
+    contextWindowMode: 'latest_turn_only',
     query: clipText(query, 1200),
     answerText: clipText(answerText, 1200),
     latestUserQuery: clipText(latestUserQuery || query, 1200),
     semanticQuery,
     sparseQuery,
     retrievalEntities,
-    assistantEntityTokens,
-    brandEntityTokens: assistantEntityTokens,
+    assistantEntityTokensRaw,
+    assistantEntityTokensFiltered,
+    assistantEntityTokens: assistantEntityTokensFiltered,
+    brandEntityTokens: assistantEntityTokensFiltered,
     retrievalQuery,
     recentTurns,
     localeHint,
@@ -8108,8 +8190,22 @@ async function evaluateSinglePlacementOpportunity({
   const hybridSparseWeight = clampNumber(retrievalPolicy?.hybrid?.sparseWeight, 0, 1, 0.65)
   const hybridDenseWeight = clampNumber(retrievalPolicy?.hybrid?.denseWeight, 0, 1, 0.35)
   const hybridStrategy = String(retrievalPolicy?.hybrid?.strategy || 'rrf_then_linear').trim() || 'rrf_then_linear'
-  const minLexicalScore = clampNumber(runtimeConfig?.relevancePolicy?.minLexicalScore, 0, 1, 0.02)
-  const minVectorScore = clampNumber(runtimeConfig?.relevancePolicy?.minVectorScore, 0, 1, 0.35)
+  const configuredMinLexicalScore = clampNumber(runtimeConfig?.relevancePolicy?.minLexicalScore, 0, 1, 0.02)
+  const configuredMinVectorScore = clampNumber(runtimeConfig?.relevancePolicy?.minVectorScore, 0, 1, 0.35)
+  const minLexicalScore = Math.max(configuredMinLexicalScore, 0.02)
+  const minVectorScore = Math.max(configuredMinVectorScore, 0.2)
+  const thresholdFloorsApplied = {
+    minLexicalScore: {
+      configured: configuredMinLexicalScore,
+      floor: 0.02,
+      effective: minLexicalScore,
+    },
+    minVectorScore: {
+      configured: configuredMinVectorScore,
+      floor: 0.2,
+      effective: minVectorScore,
+    },
+  }
   const intentScoreFloor = clampNumber(runtimeConfig?.relevancePolicy?.intentScoreFloor, 0, 1, 0.38)
   const houseLowInfoFilterEnabled = parseFeatureSwitch(
     runtimeConfig?.relevancePolicy?.houseLowInfoFilterEnabled,
@@ -8147,6 +8243,13 @@ async function evaluateSinglePlacementOpportunity({
     queryUsed: sparseRetrievalQuery,
     semanticQuery: semanticRetrievalQuery,
     sparseQuery: sparseRetrievalQuery,
+    contextWindowMode: String(messageContext?.contextWindowMode || 'latest_turn_only').trim() || 'latest_turn_only',
+    assistantEntityTokensRaw: Array.isArray(messageContext?.assistantEntityTokensRaw)
+      ? messageContext.assistantEntityTokensRaw
+      : [],
+    assistantEntityTokensFiltered: Array.isArray(messageContext?.assistantEntityTokensFiltered)
+      ? messageContext.assistantEntityTokensFiltered
+      : [],
     filters: retrievalFilters,
     languageMatchMode,
     languageResolved: retrievalLanguageResolved,
@@ -8169,6 +8272,8 @@ async function evaluateSinglePlacementOpportunity({
     penaltiesApplied: [],
     houseShareBeforeCap: 0,
     houseShareAfterCap: 0,
+    brandIntentBlockedNoHit: false,
+    options: [],
   }
   let rankingDebug = {
     relevanceGate: {
@@ -8182,6 +8287,7 @@ async function evaluateSinglePlacementOpportunity({
       triggered: false,
     },
     relevanceFilteredCount: 0,
+    thresholdFloorsApplied,
   }
   let gatePassed = false
   let budgetDecision = {
@@ -8261,7 +8367,15 @@ async function evaluateSinglePlacementOpportunity({
           query: sparseRetrievalQuery,
           semanticQuery: semanticRetrievalQuery,
           sparseQuery: sparseRetrievalQuery,
+          topicQuery: String(messageContext.latestUserQuery || semanticRetrievalQuery || sparseRetrievalQuery || '').trim(),
           brandEntityTokens,
+          contextWindowMode: String(messageContext?.contextWindowMode || 'latest_turn_only').trim() || 'latest_turn_only',
+          assistantEntityTokensRaw: Array.isArray(messageContext?.assistantEntityTokensRaw)
+            ? messageContext.assistantEntityTokensRaw
+            : [],
+          assistantEntityTokensFiltered: Array.isArray(messageContext?.assistantEntityTokensFiltered)
+            ? messageContext.assistantEntityTokensFiltered
+            : [],
           filters: retrievalFilters,
           queryMode: retrievalQueryMode,
           languageMatchMode,
@@ -8286,6 +8400,17 @@ async function evaluateSinglePlacementOpportunity({
         retrievalDebug = retrieval?.debug && typeof retrieval.debug === 'object'
           ? retrieval.debug
           : retrievalDebug
+        retrievalDebug = {
+          ...retrievalDebug,
+          contextWindowMode: String(messageContext?.contextWindowMode || retrievalDebug?.contextWindowMode || 'latest_turn_only')
+            .trim() || 'latest_turn_only',
+          assistantEntityTokensRaw: Array.isArray(messageContext?.assistantEntityTokensRaw)
+            ? messageContext.assistantEntityTokensRaw
+            : (Array.isArray(retrievalDebug?.assistantEntityTokensRaw) ? retrievalDebug.assistantEntityTokensRaw : []),
+          assistantEntityTokensFiltered: Array.isArray(messageContext?.assistantEntityTokensFiltered)
+            ? messageContext.assistantEntityTokensFiltered
+            : (Array.isArray(retrievalDebug?.assistantEntityTokensFiltered) ? retrievalDebug.assistantEntityTokensFiltered : []),
+        }
         stageStatusMap.retrieval = toPositiveInteger(retrievalDebug.fusedHitCount, 0) > 0 ? 'hit' : 'miss'
 
         const rankingStartedAt = Date.now()
@@ -8305,6 +8430,8 @@ async function evaluateSinglePlacementOpportunity({
           scoreFloor,
           minLexicalScore,
           minVectorScore,
+          topicCoverageGateEnabled: placementId === PLACEMENT_ID_INTENT_RECOMMENDATION,
+          topicCoverageThreshold: 0.1,
           placementId,
           triggerType,
           placement: 'block',
@@ -8313,6 +8440,10 @@ async function evaluateSinglePlacementOpportunity({
         stageDurationsMs.ranking = Math.max(0, Date.now() - rankingStartedAt)
 
         rankingDebug = ranking?.debug && typeof ranking.debug === 'object' ? ranking.debug : {}
+        rankingDebug = {
+          ...rankingDebug,
+          thresholdFloorsApplied,
+        }
         const budgetRiskSelection = await selectWinnerWithBudgetAndRisk({
           rankedCandidates: ranking?.ranked,
           request,
@@ -8489,7 +8620,7 @@ async function evaluateV2BidOpportunityFirst(payload) {
     ? runtimeConfig.retrievalPolicy
     : {}
   const messageContext = deriveBidMessageContext(request.messages, {
-    sparseQueryMaxTokens: toPositiveInteger(retrievalPolicy.sparseQueryMaxTokens, 24),
+    sparseQueryMaxTokens: toPositiveInteger(retrievalPolicy.sparseQueryMaxTokens, 18),
     assistantEntityMaxCount: toPositiveInteger(retrievalPolicy.assistantEntityMaxCount, 16),
   })
   const writer = createOpportunityChainWriter()
@@ -8654,6 +8785,9 @@ async function evaluateV2BidOpportunityFirst(payload) {
       queryUsed: '',
       semanticQuery: '',
       sparseQuery: '',
+      contextWindowMode: 'latest_turn_only',
+      assistantEntityTokensRaw: [],
+      assistantEntityTokensFiltered: [],
       filters: {
         networks: [],
         market: '',
@@ -8685,10 +8819,25 @@ async function evaluateV2BidOpportunityFirst(payload) {
       penaltiesApplied: [],
       houseShareBeforeCap: 0,
       houseShareAfterCap: 0,
+      brandIntentBlockedNoHit: false,
+      options: [],
     }
   const rankingDebug = selectedPlacementResult?.rankingDebug && typeof selectedPlacementResult.rankingDebug === 'object'
     ? selectedPlacementResult.rankingDebug
-    : {}
+    : {
+      thresholdFloorsApplied: {
+        minLexicalScore: {
+          configured: clampNumber(runtimeConfig?.relevancePolicy?.minLexicalScore, 0, 1, 0.02),
+          floor: 0.02,
+          effective: Math.max(clampNumber(runtimeConfig?.relevancePolicy?.minLexicalScore, 0, 1, 0.02), 0.02),
+        },
+        minVectorScore: {
+          configured: clampNumber(runtimeConfig?.relevancePolicy?.minVectorScore, 0, 1, 0.35),
+          floor: 0.2,
+          effective: Math.max(clampNumber(runtimeConfig?.relevancePolicy?.minVectorScore, 0, 1, 0.35), 0.2),
+        },
+      },
+    }
   const pricingSnapshot = selectedPlacementResult?.pricingSnapshot
     || (winnerBid?.pricing && typeof winnerBid.pricing === 'object' ? winnerBid.pricing : null)
   const pricingVersion = String(

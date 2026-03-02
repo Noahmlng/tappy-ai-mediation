@@ -12,6 +12,8 @@ import {
 const DEFAULT_SCORE_FLOOR = 0.32
 const DEFAULT_INTENT_MIN_LEXICAL_SCORE = 0.02
 const DEFAULT_INTENT_MIN_VECTOR_SCORE = 0.35
+const DEFAULT_INTENT_MIN_VECTOR_SCORE_FLOOR = 0.2
+const DEFAULT_TOPIC_COVERAGE_THRESHOLD = 0.1
 const RELEVANCE_GATED_PLACEMENTS = new Set(['chat_intent_recommendation_v1', 'chat_from_answer_v1'])
 const RELEVANCE_POLICY_MODES = new Set(['observe', 'shadow', 'enforce'])
 
@@ -291,14 +293,16 @@ function buildRelevanceGateSnapshot(input = {}) {
 
 function chooseRelevanceEligibleCandidates(baseEligible = [], input = {}) {
   const placementId = cleanText(input.placementId)
-  const minLexicalScore = clamp01(
+  const configuredMinLexicalScore = clamp01(
     input.minLexicalScore ?? DEFAULT_INTENT_MIN_LEXICAL_SCORE,
     DEFAULT_INTENT_MIN_LEXICAL_SCORE,
   )
-  const minVectorScore = clamp01(
+  const configuredMinVectorScore = clamp01(
     input.minVectorScore ?? DEFAULT_INTENT_MIN_VECTOR_SCORE,
     DEFAULT_INTENT_MIN_VECTOR_SCORE,
   )
+  const minLexicalScore = Math.max(configuredMinLexicalScore, DEFAULT_INTENT_MIN_LEXICAL_SCORE)
+  const minVectorScore = Math.max(configuredMinVectorScore, DEFAULT_INTENT_MIN_VECTOR_SCORE_FLOOR)
   const relevancePolicy = input.relevancePolicyV2 && typeof input.relevancePolicyV2 === 'object'
     ? input.relevancePolicyV2
     : {}
@@ -515,6 +519,10 @@ export function rankOpportunityCandidates(input = {}) {
     : []
   const query = cleanText(input.query)
   const answerText = cleanText(input.answerText)
+  const topicCoverageGateEnabled = input.topicCoverageGateEnabled === true
+  const topicCoverageThreshold = clamp01(
+    input.topicCoverageThreshold ?? DEFAULT_TOPIC_COVERAGE_THRESHOLD,
+  )
 
   const blockedTopic = containsBlockedTopic(`${query} ${answerText}`, blockedTopics)
   if (blockedTopic) {
@@ -543,6 +551,9 @@ export function rankOpportunityCandidates(input = {}) {
           blockedReason: '',
         }),
         relevanceFilteredCount: 0,
+        topicCoverageGateEnabled,
+        topicCoverageThreshold,
+        topicCoverageFilteredCount: 0,
         relevanceDebug: {
           relevanceScore: 0,
           componentScores: {
@@ -597,6 +608,9 @@ export function rankOpportunityCandidates(input = {}) {
           blockedReason: '',
         }),
         relevanceFilteredCount: 0,
+        topicCoverageGateEnabled,
+        topicCoverageThreshold,
+        topicCoverageFilteredCount: 0,
         relevanceDebug: {
           relevanceScore: 0,
           componentScores: {
@@ -629,8 +643,15 @@ export function rankOpportunityCandidates(input = {}) {
   const baseEligible = candidates
     .filter((item) => cleanText(item?.title) && cleanText(item?.targetUrl))
     .filter((item) => cleanText(item?.availability || 'active').toLowerCase() === 'active')
+  const topicCoverageEligible = topicCoverageGateEnabled
+    ? baseEligible.filter((item) => (
+      toFiniteNumber(item?.topicCoverageScore, 0) >= topicCoverageThreshold
+      || toFiniteNumber(item?.brandEntityHitCount, 0) > 0
+    ))
+    : baseEligible
+  const topicCoverageFilteredCount = Math.max(0, baseEligible.length - topicCoverageEligible.length)
 
-  const relevanceSelection = chooseRelevanceEligibleCandidates(baseEligible, {
+  const relevanceSelection = chooseRelevanceEligibleCandidates(topicCoverageEligible, {
     ...input,
     placementId,
     query,
@@ -651,6 +672,9 @@ export function rankOpportunityCandidates(input = {}) {
         scoreFloor,
         relevanceGate,
         relevanceFilteredCount,
+        topicCoverageGateEnabled,
+        topicCoverageThreshold,
+        topicCoverageFilteredCount,
         relevanceDebug: relevanceSelection.relevanceDebug,
         pricingModel: pricingDefaults.modelVersion,
       },
@@ -711,6 +735,9 @@ export function rankOpportunityCandidates(input = {}) {
         scoreFloor,
         relevanceGate: relevanceGateWithWinner,
         relevanceFilteredCount,
+        topicCoverageGateEnabled,
+        topicCoverageThreshold,
+        topicCoverageFilteredCount,
         relevanceDebug: {
           ...relevanceSelection.relevanceDebug,
           relevanceScore: winner ? clamp01(winner.relevanceScore) : relevanceSelection.relevanceDebug.relevanceScore,
@@ -747,6 +774,9 @@ export function rankOpportunityCandidates(input = {}) {
       scoreFloor,
       relevanceGate: relevanceGateWithWinner,
       relevanceFilteredCount,
+      topicCoverageGateEnabled,
+      topicCoverageThreshold,
+      topicCoverageFilteredCount,
       relevanceDebug: {
         ...relevanceSelection.relevanceDebug,
         relevanceScore: clamp01(winner.relevanceScore),
