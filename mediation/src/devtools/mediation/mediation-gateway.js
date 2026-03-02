@@ -8263,6 +8263,8 @@ async function evaluateSinglePlacementOpportunity({
     queryUsed: sparseRetrievalQuery,
     semanticQuery: semanticRetrievalQuery,
     sparseQuery: sparseRetrievalQuery,
+    sparseQueryTokens: [],
+    vectorInputTextPreview: String(semanticRetrievalQuery || '').trim().slice(0, 220),
     contextWindowMode: String(messageContext?.contextWindowMode || 'latest_turn_only').trim() || 'latest_turn_only',
     assistantEntityTokensRaw: Array.isArray(messageContext?.assistantEntityTokensRaw)
       ? messageContext.assistantEntityTokensRaw
@@ -8479,6 +8481,7 @@ async function evaluateSinglePlacementOpportunity({
         rankingDebug = {
           ...rankingDebug,
           thresholdFloorsApplied,
+          offerQuotes: buildRankingOfferQuotes(ranking?.ranked, { limit: finalTopK }),
         }
         const budgetRiskSelection = await selectWinnerWithBudgetAndRisk({
           rankedCandidates: ranking?.ranked,
@@ -8831,6 +8834,8 @@ async function evaluateV2BidOpportunityFirst(payload) {
       queryUsed: '',
       semanticQuery: '',
       sparseQuery: '',
+      sparseQueryTokens: [],
+      vectorInputTextPreview: '',
       contextWindowMode: 'latest_turn_only',
       assistantEntityTokensRaw: [],
       assistantEntityTokensFiltered: [],
@@ -9296,6 +9301,190 @@ function summarizeAdsForDecisionLog(ads) {
     .filter(Boolean)
 }
 
+function buildRankingOfferQuotes(candidates = [], options = {}) {
+  const limit = Math.max(1, toPositiveInteger(options.limit, 40))
+  return (Array.isArray(candidates) ? candidates : [])
+    .slice(0, limit)
+    .map((candidate) => {
+      const item = candidate && typeof candidate === 'object' ? candidate : null
+      if (!item) return null
+      const offerId = String(item.offerId || '').trim()
+      const network = String(item.network || '').trim().toLowerCase()
+      const pricing = item.pricing && typeof item.pricing === 'object' ? item.pricing : {}
+      const campaignId = String(
+        item?.metadata?.campaignId
+        || item?.metadata?.campaign_id
+        || item?.metadata?.programId
+        || item?.metadata?.program_id
+        || '',
+      ).trim()
+      return {
+        offerId,
+        network,
+        rankScore: round(clampNumber(item.rankScore, 0, 1, 0), 6),
+        auctionScore: round(clampNumber(item.auctionScore, 0, 1, 0), 6),
+        relevanceScore: round(clampNumber(item.relevanceScore, 0, 1, 0), 6),
+        fusedScore: round(clampNumber(item.fusedScore, 0, 1, 0), 6),
+        lexicalScore: round(clampNumber(item.lexicalScore, 0, 1, 0), 6),
+        vectorScore: round(clampNumber(item.vectorScore, 0, 1, 0), 6),
+        quote: {
+          price: round(clampNumber(pricing.cpcUsd ?? item.bidHint, 0, Number.MAX_SAFE_INTEGER, 0), 4),
+          cpcUsd: round(clampNumber(pricing.cpcUsd, 0, Number.MAX_SAFE_INTEGER, 0), 4),
+          ecpmUsd: round(clampNumber(pricing.ecpmUsd, 0, Number.MAX_SAFE_INTEGER, 0), 4),
+          cpaUsd: round(clampNumber(pricing.cpaUsd, 0, Number.MAX_SAFE_INTEGER, 0), 4),
+          pClick: round(clampNumber(pricing.pClick, 0, 1, 0), 6),
+          pConv: round(clampNumber(pricing.pConv, 0, 1, 0), 6),
+          pricingModel: String(pricing.modelVersion || '').trim(),
+          billingUnit: String(pricing.billingUnit || '').trim().toLowerCase(),
+          campaignId,
+        },
+      }
+    })
+    .filter(Boolean)
+}
+
+function summarizeRetrievalOptionsForDeveloperTrace(items = [], options = {}) {
+  const limit = Math.max(1, toPositiveInteger(options.limit, 40))
+  return (Array.isArray(items) ? items : [])
+    .slice(0, limit)
+    .map((item) => {
+      const candidate = item && typeof item === 'object' ? item : null
+      if (!candidate) return null
+      return {
+        offerId: String(candidate.offerId || '').trim(),
+        network: String(candidate.network || '').trim().toLowerCase(),
+        lexicalScore: round(clampNumber(candidate.lexicalScore, 0, 1, 0), 6),
+        bm25Raw: round(clampNumber(candidate.bm25Raw, 0, Number.MAX_SAFE_INTEGER, 0), 6),
+        vectorScore: round(clampNumber(candidate.vectorScore, -1, 1, 0), 6),
+        fusedScore: round(clampNumber(candidate.fusedScore, 0, 1, 0), 6),
+        topicCoverageScore: round(clampNumber(candidate.topicCoverageScore, 0, 1, 0), 6),
+        eliminationReason: String(candidate.eliminationReason || '').trim(),
+      }
+    })
+    .filter(Boolean)
+}
+
+function summarizeRankingCandidatesForDeveloperTrace(items = [], options = {}) {
+  const limit = Math.max(1, toPositiveInteger(options.limit, 40))
+  return (Array.isArray(items) ? items : [])
+    .slice(0, limit)
+    .map((item) => {
+      const candidate = item && typeof item === 'object' ? item : null
+      if (!candidate) return null
+      return {
+        offerId: String(candidate.offerId || '').trim(),
+        network: String(candidate.network || '').trim().toLowerCase(),
+        relevanceScore: round(clampNumber(candidate.relevanceScore, 0, 1, 0), 6),
+        fusedScore: round(clampNumber(candidate.fusedScore, 0, 1, 0), 6),
+        lexicalScore: round(clampNumber(candidate.lexicalScore, 0, 1, 0), 6),
+        vectorScore: round(clampNumber(candidate.vectorScore, 0, 1, 0), 6),
+        gateScore: round(clampNumber(candidate.gateScore, 0, 1, 0), 6),
+        eligible: candidate.eligible === true,
+        eliminationReason: String(candidate.eliminationReason || '').trim(),
+      }
+    })
+    .filter(Boolean)
+}
+
+function buildDecisionEventDeveloperTrace(input = {}) {
+  const source = input && typeof input === 'object' ? input : {}
+  const runtime = source.runtime && typeof source.runtime === 'object' ? source.runtime : {}
+  const requestInput = source.requestInput && typeof source.requestInput === 'object' ? source.requestInput : {}
+  const decision = source.decision && typeof source.decision === 'object' ? source.decision : {}
+  const ads = Array.isArray(source.ads) ? source.ads : []
+  const firstAd = ads[0] && typeof ads[0] === 'object' ? ads[0] : {}
+  const retrievalDebug = runtime.retrievalDebug && typeof runtime.retrievalDebug === 'object'
+    ? runtime.retrievalDebug
+    : {}
+  const rankingDebug = runtime.rankingDebug && typeof runtime.rankingDebug === 'object'
+    ? runtime.rankingDebug
+    : {}
+  const stageStatusMap = runtime.stageStatusMap && typeof runtime.stageStatusMap === 'object'
+    ? runtime.stageStatusMap
+    : {}
+  const timingsMs = runtime.stageDurationsMs && typeof runtime.stageDurationsMs === 'object'
+    ? runtime.stageDurationsMs
+    : {}
+  const multiPlacement = runtime.multiPlacement && typeof runtime.multiPlacement === 'object'
+    ? runtime.multiPlacement
+    : {}
+  const quoteItems = Array.isArray(rankingDebug.offerQuotes)
+    ? rankingDebug.offerQuotes
+    : []
+  return {
+    scope: 'developer_only',
+    schemaVersion: 'dashboard_observability_v1',
+    generatedAt: nowIso(),
+    io: {
+      input: {
+        appId: String(requestInput.appId || '').trim(),
+        accountId: String(requestInput.accountId || '').trim(),
+        placementId: String(requestInput.placementId || '').trim(),
+        placementKey: String(requestInput.placementKey || '').trim(),
+        query: clipText(requestInput.query, 280),
+        answerText: clipText(requestInput.answerText, 800),
+        locale: String(requestInput.locale || '').trim(),
+        intentClass: String(requestInput.intentClass || '').trim(),
+        intentScore: clampNumber(requestInput.intentScore, 0, 1, 0),
+      },
+      output: {
+        result: String(decision.result || '').trim(),
+        reason: String(decision.reason || '').trim(),
+        reasonDetail: String(decision.reasonDetail || '').trim(),
+        filled: decision.result === 'served',
+        winnerAdId: String(firstAd.adId || '').trim(),
+        winnerNetwork: String(firstAd.sourceNetwork || '').trim().toLowerCase(),
+      },
+    },
+    steps: {
+      search: {
+        keywords: {
+          queryUsed: String(retrievalDebug.queryUsed || '').trim(),
+          semanticQuery: String(retrievalDebug.semanticQuery || '').trim(),
+          sparseQuery: String(retrievalDebug.sparseQuery || '').trim(),
+          topicQuery: String(retrievalDebug.topicQuery || '').trim(),
+        },
+        mode: String(retrievalDebug.mode || '').trim(),
+        filters: retrievalDebug.filters && typeof retrievalDebug.filters === 'object'
+          ? retrievalDebug.filters
+          : {},
+        hitCount: toPositiveInteger(retrievalDebug.fusedHitCount, 0),
+        results: summarizeRetrievalOptionsForDeveloperTrace(retrievalDebug.options, { limit: 40 }),
+      },
+      matching: {
+        reasonCode: String(runtime.reasonCode || '').trim(),
+        relevanceGate: rankingDebug.relevanceGate && typeof rankingDebug.relevanceGate === 'object'
+          ? rankingDebug.relevanceGate
+          : {},
+        scoredOffers: summarizeRankingCandidatesForDeveloperTrace(rankingDebug.candidates, { limit: 40 }),
+      },
+      pricing: {
+        pricingModel: String(rankingDebug.pricingModel || '').trim(),
+        offerQuotes: Array.isArray(quoteItems) ? quoteItems.slice(0, 40) : [],
+      },
+      selection: {
+        triggerType: String(runtime.triggerType || '').trim(),
+        budgetDecision: runtime.budgetDecision && typeof runtime.budgetDecision === 'object'
+          ? runtime.budgetDecision
+          : {},
+        riskDecision: runtime.riskDecision && typeof runtime.riskDecision === 'object'
+          ? runtime.riskDecision
+          : {},
+        multiPlacement: {
+          evaluatedCount: toPositiveInteger(multiPlacement.evaluatedCount, 0),
+          winnerPlacementId: String(multiPlacement.winnerPlacementId || '').trim(),
+          selectionReason: String(multiPlacement.selectionReason || '').trim(),
+          options: Array.isArray(multiPlacement.options) ? multiPlacement.options.slice(0, 8) : [],
+        },
+      },
+      pipeline: {
+        stageStatusMap,
+        timingsMs,
+      },
+    },
+  }
+}
+
 async function recordDecisionForRequest({ request, placement, requestId, decision, runtime, ads }) {
   const result = DECISION_REASON_ENUM.has(decision?.result) ? decision.result : 'error'
   const reason = DECISION_REASON_ENUM.has(decision?.reason) ? decision.reason : 'error'
@@ -9337,6 +9526,13 @@ async function recordDecisionForRequest({ request, placement, requestId, decisio
     }
   }
 
+  const developerTrace = buildDecisionEventDeveloperTrace({
+    requestInput: payload.input,
+    decision: payload,
+    runtime,
+    ads: payload.ads,
+  })
+
   await recordDecision(payload)
   await recordEvent({
     eventType: 'decision',
@@ -9351,6 +9547,9 @@ async function recordDecisionForRequest({ request, placement, requestId, decisio
     result,
     reason,
     reasonDetail: payload.reasonDetail || '',
+    observabilityTier: 'developer',
+    developerOnly: true,
+    developerTrace,
   })
 }
 

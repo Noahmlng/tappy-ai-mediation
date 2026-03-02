@@ -295,6 +295,37 @@ test('next-step decision logs are recorded through v2 bid flow', async () => {
       true,
     )
     assert.equal(typeof row?.runtime?.relevance?.thresholdsApplied?.thresholdVersion, 'string')
+
+    const events = await requestJson(
+      baseUrl,
+      `/api/v1/dashboard/events?eventType=decision&requestId=${encodeURIComponent(requestId)}`,
+      {
+        headers: dashboardHeaders,
+      },
+    )
+    assert.equal(events.ok, true, `event query failed: ${JSON.stringify(events.payload)}`)
+    const eventItems = Array.isArray(events.payload?.items) ? events.payload.items : []
+    const eventRow = eventItems.find((item) => String(item?.requestId || '').trim() === requestId)
+    assert.equal(Boolean(eventRow), true, 'decision event row should be present')
+    assert.equal(eventRow?.eventType, 'decision')
+    assert.equal(eventRow?.developerOnly, true)
+    assert.equal(eventRow?.observabilityTier, 'developer')
+    assert.equal(typeof eventRow?.developerTrace?.schemaVersion, 'string')
+    assert.equal(eventRow?.developerTrace?.scope, 'developer_only')
+    assert.equal(typeof eventRow?.developerTrace?.io?.input?.query, 'string')
+    assert.equal(typeof eventRow?.developerTrace?.io?.output?.result, 'string')
+    assert.equal(typeof eventRow?.developerTrace?.steps?.search?.keywords?.queryUsed, 'string')
+    assert.equal(Array.isArray(eventRow?.developerTrace?.steps?.search?.results), true)
+    assert.equal(Array.isArray(eventRow?.developerTrace?.steps?.matching?.scoredOffers), true)
+    assert.equal(Array.isArray(eventRow?.developerTrace?.steps?.pricing?.offerQuotes), true)
+    assert.equal(typeof eventRow?.developerTrace?.steps?.pipeline?.timingsMs, 'object')
+    const quoteItems = Array.isArray(eventRow?.developerTrace?.steps?.pricing?.offerQuotes)
+      ? eventRow.developerTrace.steps.pricing.offerQuotes
+      : []
+    if (quoteItems.length > 0) {
+      assert.equal(typeof quoteItems[0]?.quote?.cpcUsd, 'number')
+      assert.equal(typeof quoteItems[0]?.quote?.price, 'number')
+    }
   } catch (error) {
     const logs = gateway.getLogs()
     const message = error instanceof Error ? error.message : String(error)
