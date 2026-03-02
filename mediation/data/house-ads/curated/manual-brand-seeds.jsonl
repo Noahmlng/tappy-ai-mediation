@@ -1,1 +1,48 @@
-
+{"brand_name":"Peloton","candidate_domains":["peloton.com"],"vertical_l1":"health_wellness","vertical_l2":"fitness","market":"US"}
+{"brand_name":"Life Fitness","candidate_domains":["lifefitness.com"],"vertical_l1":"health_wellness","vertical_l2":"fitness","market":"US"}
+{"brand_name":"NordicTrack","candidate_domains":["nordictrack.com"],"vertical_l1":"health_wellness","vertical_l2":"fitness","market":"US"}
+{"brand_name":"Instacart","candidate_domains":["instacart.com"],"vertical_l1":"food_beverage","vertical_l2":"grocery_delivery","market":"US"}
+{"brand_name":"Shipt","candidate_domains":["shipt.com"],"vertical_l1":"food_beverage","vertical_l2":"grocery_delivery","market":"US"}
+{"brand_name":"FreshDirect","candidate_domains":["freshdirect.com"],"vertical_l1":"food_beverage","vertical_l2":"grocery_delivery","market":"US"}
+{"brand_name":"HelloFresh","candidate_domains":["hellofresh.com"],"vertical_l1":"food_beverage","vertical_l2":"meal_kits","market":"US"}
+{"brand_name":"Blue Apron","candidate_domains":["blueapron.com"],"vertical_l1":"food_beverage","vertical_l2":"meal_kits","market":"US"}
+{"brand_name":"EveryPlate","candidate_domains":["everyplate.com"],"vertical_l1":"food_beverage","vertical_l2":"meal_kits","market":"US"}
+{"brand_name":"Starbucks","candidate_domains":["starbucks.com"],"vertical_l1":"food_beverage","vertical_l2":"beverages","market":"US"}
+{"brand_name":"Peet's Coffee","candidate_domains":["peets.com"],"vertical_l1":"food_beverage","vertical_l2":"beverages","market":"US"}
+{"brand_name":"Hint Water","candidate_domains":["drinkhint.com"],"vertical_l1":"food_beverage","vertical_l2":"beverages","market":"US"}
+{"brand_name":"Tesla","candidate_domains":["tesla.com"],"vertical_l1":"mobility","vertical_l2":"electric_vehicles","market":"US"}
+{"brand_name":"Rivian","candidate_domains":["rivian.com"],"vertical_l1":"mobility","vertical_l2":"electric_vehicles","market":"US"}
+{"brand_name":"Lucid Motors","candidate_domains":["lucidmotors.com"],"vertical_l1":"mobility","vertical_l2":"electric_vehicles","market":"US"}
+{"brand_name":"Hertz","candidate_domains":["hertz.com"],"vertical_l1":"mobility","vertical_l2":"car_rentals","market":"US"}
+{"brand_name":"Avis","candidate_domains":["avis.com"],"vertical_l1":"mobility","vertical_l2":"car_rentals","market":"US"}
+{"brand_name":"Zipcar","candidate_domains":["zipcar.com"],"vertical_l1":"mobility","vertical_l2":"car_rentals","market":"US"}
+{"brand_name":"WeatherTech","candidate_domains":["weathertech.com"],"vertical_l1":"mobility","vertical_l2":"car_accessories","market":"US"}
+{"brand_name":"Covercraft","candidate_domains":["covercraft.com"],"vertical_l1":"mobility","vertical_l2":"car_accessories","market":"US"}
+{"brand_name":"Anker","candidate_domains":["anker.com"],"vertical_l1":"mobility","vertical_l2":"car_accessories","market":"US"}
+{"brand_name":"Segway","candidate_domains":["segway.com"],"vertical_l1":"mobility","vertical_l2":"electric_transportation","market":"US"}
+{"brand_name":"NIU","candidate_domains":["niu.com"],"vertical_l1":"mobility","vertical_l2":"electric_transportation","market":"US"}
+{"brand_name":"Super73","candidate_domains":["super73.com"],"vertical_l1":"mobility","vertical_l2":"electric_transportation","market":"US"}
+{"brand_name":"Netflix","candidate_domains":["netflix.com"],"vertical_l1":"gaming_entertainment","vertical_l2":"movies_streaming","market":"US"}
+{"brand_name":"Disney+","candidate_domains":["disneyplus.com"],"vertical_l1":"gaming_entertainment","vertical_l2":"movies_streaming","market":"US"}
+{"brand_name":"Prime Video","candidate_domains":["primevideo.com"],"vertical_l1":"gaming_entertainment","vertical_l2":"movies_streaming","market":"US"}
+{"brand_name":"Steam","candidate_domains":["steampowered.com"],"vertical_l1":"gaming_entertainment","vertical_l2":"gaming","market":"US"}
+{"brand_name":"Epic Games","candidate_domains":["epicgames.com"],"vertical_l1":"gaming_entertainment","vertical_l2":"gaming","market":"US"}
+{"brand_name":"Xbox","candidate_domains":["xbox.com"],"vertical_l1":"gaming_entertainment","vertical_l2":"gaming","market":"US"}
+{"brand_name":"Spotify","candidate_domains":["spotify.com"],"vertical_l1":"gaming_entertainment","vertical_l2":"music","market":"US"}
+{"brand_name":"TIDAL","candidate_domains":["tidal.com"],"vertical_l1":"gaming_entertainment","vertical_l2":"music","market":"US"}
+{"brand_name":"Pandora","candidate_domains":["pandora.com"],"vertical_l1":"gaming_entertainment","vertical_l2":"music","market":"US"}
+{"brand_name":"Fitbit","candidate_domains":["fitbit.com"],"vertical_l1":"consumer_electronics","vertical_l2":"wearables","market":"US"}
+{"brand_name":"Garmin","candidate_domains":["garmin.com"],"vertical_l1":"consumer_electronics","vertical_l2":"wearables","market":"US"}
+{"brand_name":"Oura","candidate_domains":["ouraring.com"],"vertical_l1":"consumer_electronics","vertical_l2":"wearables","market":"US"}
+{"brand_name":"Meta","candidate_domains":["meta.com"],"vertical_l1":"consumer_electronics","vertical_l2":"vr_ar","market":"US"}
+{"brand_name":"HTC Vive","candidate_domains":["vive.com"],"vertical_l1":"consumer_electronics","vertical_l2":"vr_ar","market":"US"}
+{"brand_name":"Varjo","candidate_domains":["varjo.com"],"vertical_l1":"consumer_electronics","vertical_l2":"vr_ar","market":"US"}
+{"brand_name":"Ring","candidate_domains":["ring.com"],"vertical_l1":"consumer_electronics","vertical_l2":"smart_home_devices","market":"US"}
+{"brand_name":"ecobee","candidate_domains":["ecobee.com"],"vertical_l1":"consumer_electronics","vertical_l2":"smart_home_devices","market":"US"}
+{"brand_name":"Arlo","candidate_domains":["arlo.com"],"vertical_l1":"consumer_electronics","vertical_l2":"smart_home_devices","market":"US"}
+{"brand_name":"Blueland","candidate_domains":["blueland.com"],"vertical_l1":"sustainability","vertical_l2":"eco_friendly_goods","market":"US"}
+{"brand_name":"Package Free","candidate_domains":["packagefreeshop.com"],"vertical_l1":"sustainability","vertical_l2":"eco_friendly_goods","market":"US"}
+{"brand_name":"tentree","candidate_domains":["tentree.com"],"vertical_l1":"sustainability","vertical_l2":"eco_friendly_goods","market":"US"}
+{"brand_name":"Sunrun","candidate_domains":["sunrun.com"],"vertical_l1":"sustainability","vertical_l2":"renewable_energy","market":"US"}
+{"brand_name":"Sunnova","candidate_domains":["sunnova.com"],"vertical_l1":"sustainability","vertical_l2":"renewable_energy","market":"US"}
+{"brand_name":"Enphase","candidate_domains":["enphase.com"],"vertical_l1":"sustainability","vertical_l2":"renewable_energy","market":"US"}

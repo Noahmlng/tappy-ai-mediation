@@ -38,6 +38,7 @@ const OFFER_HINTS = [
   'bundle',
   'free shipping',
 ]
+const IMAGE_EXT_RE = /\.(png|jpe?g|webp|gif|svg|avif|bmp|ico)(\?|#|$)/i
 
 function toNumber(value, fallback = 0) {
   const num = Number(value)
@@ -124,6 +125,52 @@ function extractLinks(html = '', baseUrl = '') {
   return rows
 }
 
+function looksLikeImageUrl(url = '') {
+  return IMAGE_EXT_RE.test(cleanText(url))
+}
+
+function collectMetaImageCandidates(html = '', pageUrl = '') {
+  const patterns = [
+    /<meta[^>]+(?:property|name)=["']og:image["'][^>]+content=["']([^"']+)["'][^>]*>/gi,
+    /<meta[^>]+(?:property|name)=["']og:image:url["'][^>]+content=["']([^"']+)["'][^>]*>/gi,
+    /<meta[^>]+(?:property|name)=["']twitter:image["'][^>]+content=["']([^"']+)["'][^>]*>/gi,
+    /<meta[^>]+(?:property|name)=["']twitter:image:src["'][^>]+content=["']([^"']+)["'][^>]*>/gi,
+    /<link[^>]+rel=["']image_src["'][^>]+href=["']([^"']+)["'][^>]*>/gi,
+  ]
+  const candidates = []
+  for (const pattern of patterns) {
+    let match = pattern.exec(html)
+    while (match) {
+      const candidate = safeUrl(match?.[1] || '', pageUrl)
+      if (candidate) candidates.push(candidate)
+      match = pattern.exec(html)
+    }
+    pattern.lastIndex = 0
+  }
+  return candidates
+}
+
+function collectImageTagCandidates(html = '', pageUrl = '') {
+  const candidates = []
+  const regex = /<img[^>]+src=["']([^"']+)["'][^>]*>/gi
+  let match = regex.exec(html)
+  while (match) {
+    const candidate = safeUrl(match[1] || '', pageUrl)
+    if (candidate) candidates.push(candidate)
+    match = regex.exec(html)
+  }
+  return candidates
+}
+
+function extractMetaImage(html = '', pageUrl = '') {
+  const metaCandidates = collectMetaImageCandidates(html, pageUrl)
+  const tagCandidates = collectImageTagCandidates(html, pageUrl)
+  const candidates = [...metaCandidates, ...tagCandidates]
+  const preferred = candidates.find((item) => looksLikeImageUrl(item))
+  if (preferred) return preferred
+  return candidates[0] || ''
+}
+
 function extractJsonLdBlocks(html = '') {
   const payloads = []
   const matches = html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)
@@ -202,7 +249,7 @@ function parseJsonLdProducts(html = '', pageUrl = '') {
   return products
 }
 
-function parseOfferLinks(html = '', pageUrl = '') {
+function parseOfferLinks(html = '', pageUrl = '', pageImageUrl = '') {
   const links = extractLinks(html, pageUrl)
   const candidates = []
   for (const link of links) {
@@ -214,6 +261,7 @@ function parseOfferLinks(html = '', pageUrl = '') {
       title: link.anchor_text.slice(0, 120),
       description: `Discover ${link.anchor_text}`.slice(0, 220),
       target_url: link.target_url,
+      image_url: pageImageUrl,
       cta_text: 'View Offer',
       extraction_method: 'anchor_offer_link',
       confidence: 0.74,
@@ -225,7 +273,7 @@ function parseOfferLinks(html = '', pageUrl = '') {
 function parseFallbackLink(page) {
   const title = compactWhitespace(page.title || page.h1 || '')
   if (!title) return null
-  return {
+  const fallback = {
     offer_type: 'link',
     title: title.slice(0, 120),
     description: compactWhitespace(page.description || `Explore offers from ${page.brand_name || 'this brand'}`).slice(0, 220),
@@ -234,6 +282,9 @@ function parseFallbackLink(page) {
     extraction_method: 'page_title_fallback',
     confidence: 0.58,
   }
+  const imageUrl = safeUrl(page.image_url || '', page.url)
+  if (imageUrl) fallback.image_url = imageUrl
+  return fallback
 }
 
 function dedupeCandidates(candidates = []) {
@@ -330,6 +381,7 @@ async function crawlJob(job, options) {
       const description = extractMetaDescription(html).slice(0, 280)
       const h1 = extractH1(html).slice(0, 180)
       const textExcerpt = stripHtmlText(html).slice(0, 320)
+      const pageImageUrl = extractMetaImage(html, url)
 
       const page = {
         url,
@@ -338,6 +390,7 @@ async function crawlJob(job, options) {
         description: cleanText(description),
         h1: cleanText(h1),
         text_excerpt: cleanText(textExcerpt),
+        image_url: cleanText(pageImageUrl),
         fetched_at: new Date().toISOString(),
       }
       pages.push(page)
@@ -346,7 +399,7 @@ async function crawlJob(job, options) {
         ...item,
         source_url: url,
       }))
-      const linkCandidates = parseOfferLinks(html, url).map((item) => ({
+      const linkCandidates = parseOfferLinks(html, url, pageImageUrl).map((item) => ({
         ...item,
         source_url: url,
       }))
@@ -393,6 +446,7 @@ async function crawlJob(job, options) {
     return {
       ...base,
       description: cleanText(item.description).slice(0, 220),
+      image_url: cleanText(item.image_url),
       cta_text: cleanText(item.cta_text || 'View Offer').slice(0, 40),
     }
   })
@@ -508,7 +562,14 @@ async function main() {
   )
 }
 
-main().catch((error) => {
-  console.error('[crawl-offers] failed:', error?.message || error)
-  process.exit(1)
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch((error) => {
+    console.error('[crawl-offers] failed:', error?.message || error)
+    process.exit(1)
+  })
+}
+
+export const __crawlOffersInternal = Object.freeze({
+  extractMetaImage,
+  parseOfferLinks,
 })
