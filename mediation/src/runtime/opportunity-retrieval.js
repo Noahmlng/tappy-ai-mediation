@@ -14,6 +14,7 @@ const DEFAULT_HYBRID_STRATEGY = 'rrf_then_linear'
 const DEFAULT_HYBRID_SPARSE_WEIGHT = 0.65
 const DEFAULT_HYBRID_DENSE_WEIGHT = 0.35
 const DEFAULT_BM25_REFRESH_INTERVAL_MS = 10 * 60 * 1000
+const DEFAULT_BM25_COLD_START_WAIT_MS = 120
 const DEFAULT_BRAND_MISS_PENALTY = 0.08
 const DEFAULT_HOUSE_SHARE_CAP = 0.6
 const DEFAULT_TOPIC_COVERAGE_THRESHOLD = 0.1
@@ -549,6 +550,7 @@ async function fetchBm25Candidates(pool, query, filters = {}, topK = DEFAULT_LEX
       acceptedLanguages: languageFilter.accepted,
       topK: toPositiveInteger(topK, DEFAULT_LEXICAL_TOP_K),
       refreshIntervalMs: toPositiveInteger(policy.bm25RefreshIntervalMs, DEFAULT_BM25_REFRESH_INTERVAL_MS),
+      coldStartWaitMs: toPositiveInteger(policy.bm25ColdStartWaitMs, DEFAULT_BM25_COLD_START_WAIT_MS),
       k1: 1.2,
       b: 0.75,
     })

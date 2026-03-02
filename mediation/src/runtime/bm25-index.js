@@ -2,6 +2,8 @@ const DEFAULT_BM25_K1 = 1.2
 const DEFAULT_BM25_B = 0.75
 const DEFAULT_BM25_REFRESH_INTERVAL_MS = 10 * 60 * 1000
 const DEFAULT_BM25_TOP_K = 120
+const DEFAULT_BM25_COLD_START_WAIT_MS = 120
+const MAX_BM25_COLD_START_WAIT_MS = 5_000
 const BM25_STOPWORDS = new Set([
   'a', 'an', 'and', 'are', 'as', 'at', 'be', 'been', 'being', 'but', 'by', 'can', 'do', 'for', 'from', 'had', 'has',
   'have', 'if', 'in', 'into', 'is', 'it', 'its', 'of', 'on', 'or', 'that', 'the', 'their', 'there', 'these', 'this',
@@ -23,6 +25,7 @@ const bm25IndexState = {
   refreshIntervalMs: DEFAULT_BM25_REFRESH_INTERVAL_MS,
   pool: null,
 }
+const BM25_BUILD_WAIT_TIMEOUT = Symbol('bm25_build_wait_timeout')
 
 function cleanText(value) {
   return String(value || '').trim().replace(/\s+/g, ' ')
@@ -38,6 +41,32 @@ function toPositiveInteger(value, fallback = 0) {
   const n = Number(value)
   if (!Number.isFinite(n) || n <= 0) return fallback
   return Math.floor(n)
+}
+
+function normalizeColdStartWaitMs(value) {
+  const normalized = toPositiveInteger(value, DEFAULT_BM25_COLD_START_WAIT_MS)
+  return Math.min(MAX_BM25_COLD_START_WAIT_MS, Math.max(1, normalized))
+}
+
+async function waitForIndexBuild(buildPromise, coldStartWaitMs) {
+  if (!buildPromise || typeof buildPromise.then !== 'function') {
+    return bm25IndexState.activeIndex
+  }
+  const waitMs = normalizeColdStartWaitMs(coldStartWaitMs)
+  let timeout = null
+  try {
+    const indexOrTimeout = await Promise.race([
+      buildPromise,
+      new Promise((resolve) => {
+        timeout = setTimeout(() => resolve(BM25_BUILD_WAIT_TIMEOUT), waitMs)
+      }),
+    ])
+    return indexOrTimeout === BM25_BUILD_WAIT_TIMEOUT
+      ? bm25IndexState.activeIndex
+      : indexOrTimeout
+  } finally {
+    if (timeout) clearTimeout(timeout)
+  }
 }
 
 function round(value, precision = 6) {
@@ -288,15 +317,21 @@ async function ensureBm25Index(pool, options = {}) {
     options.refreshIntervalMs,
     DEFAULT_BM25_REFRESH_INTERVAL_MS,
   )
+  const coldStartWaitMs = normalizeColdStartWaitMs(options.coldStartWaitMs)
   ensureRefreshTimer(refreshIntervalMs)
   const poolChanged = Boolean(pool && pool !== bm25IndexState.pool)
   if (poolChanged) {
     bm25IndexState.pool = pool
-    return rebuildBm25Index(pool, options)
+    const buildPromise = rebuildBm25Index(pool, options)
+    if (bm25IndexState.activeIndex) {
+      return buildPromise
+    }
+    return waitForIndexBuild(buildPromise, coldStartWaitMs)
   }
 
   if (!bm25IndexState.activeIndex) {
-    return rebuildBm25Index(pool || bm25IndexState.pool, options)
+    const buildPromise = rebuildBm25Index(pool || bm25IndexState.pool, options)
+    return waitForIndexBuild(buildPromise, coldStartWaitMs)
   }
 
   const ageMs = Math.max(0, Date.now() - bm25IndexState.lastBuildAtMs)
@@ -320,6 +355,7 @@ export async function queryBm25Candidates(input = {}) {
     k1: toFiniteNumber(input.k1, DEFAULT_BM25_K1),
     b: toFiniteNumber(input.b, DEFAULT_BM25_B),
     refreshIntervalMs: toPositiveInteger(input.refreshIntervalMs, DEFAULT_BM25_REFRESH_INTERVAL_MS),
+    coldStartWaitMs: toPositiveInteger(input.coldStartWaitMs, DEFAULT_BM25_COLD_START_WAIT_MS),
   })
   if (!index || index.docCount <= 0) return []
 

@@ -8393,6 +8393,7 @@ async function evaluateSinglePlacementOpportunity({
           vectorTopK,
           finalTopK,
           bm25RefreshIntervalMs,
+          bm25ColdStartWaitMs: toPositiveInteger(retrievalPolicy.bm25ColdStartWaitMs, 120),
           brandMissPenalty,
           houseShareCap,
           hybridStrategy,

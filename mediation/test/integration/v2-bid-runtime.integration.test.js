@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
+import { resetBm25IndexCache } from '../../src/runtime/bm25-index.js'
 import { runBidAggregationPipeline } from '../../src/runtime/index.js'
 import { retrieveOpportunityCandidates } from '../../src/runtime/opportunity-retrieval.js'
 
@@ -249,6 +250,67 @@ test('v2 bid runtime: retrieval language policy locale_or_base keeps house en fo
     result.candidates.some((item) => item.offerId === 'house:resource:001'),
     true,
   )
+})
+
+test('v2 bid runtime: retrieval cold start does not block on slow bm25 index build', async () => {
+  resetBm25IndexCache()
+  const bm25BuildDelayMs = 700
+  const pool = {
+    async query(sql) {
+      if (String(sql).includes('offer_inventory_serving_snapshot')) {
+        await new Promise((resolve) => setTimeout(resolve, bm25BuildDelayMs))
+        return {
+          rows: [
+            makeServingSnapshotRow({
+              offerId: 'partnerstack:slow:001',
+              network: 'partnerstack',
+              title: 'Voice Dubbing Suite',
+              description: 'Multilingual dubbing for creators.',
+              targetUrl: 'https://partner.example.com/slow',
+            }),
+          ],
+        }
+      }
+      return {
+        rows: [
+          makeInventoryRow({
+            offerId: 'partnerstack:vector:fast',
+            network: 'partnerstack',
+            title: 'Fast Vector Candidate',
+            description: 'Fast vector retrieval candidate.',
+            targetUrl: 'https://partner.example.com/fast',
+            vectorScore: 0.73,
+          }),
+        ],
+      }
+    },
+  }
+
+  const startedAt = Date.now()
+  const result = await retrieveOpportunityCandidates({
+    query: 'best ai dubbing tools for youtube',
+    filters: {
+      networks: ['partnerstack'],
+      market: 'US',
+      language: 'en-US',
+    },
+    languageMatchMode: 'locale_or_base',
+    lexicalTopK: 10,
+    vectorTopK: 10,
+    finalTopK: 10,
+    bm25ColdStartWaitMs: 20,
+  }, {
+    pool,
+  })
+  const elapsedMs = Math.max(0, Date.now() - startedAt)
+
+  assert.equal(elapsedMs < bm25BuildDelayMs - 150, true)
+  assert.equal(result.candidates.length > 0, true)
+  assert.equal(result.debug?.vectorHitCount > 0, true)
+  assert.equal(typeof result.debug?.bm25HitCount, 'number')
+
+  await new Promise((resolve) => setTimeout(resolve, bm25BuildDelayMs + 20))
+  resetBm25IndexCache()
 })
 
 test('v2 bid runtime: retrieval low-info house candidates are filtered before ranking', async () => {
