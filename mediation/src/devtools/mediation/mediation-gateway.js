@@ -319,6 +319,8 @@ const RETRIEVAL_ENTITY_STOPWORDS = new Set([
   'what', 'when', 'where', 'who', 'how', 'why', 'would', 'could', 'should', 'very', 'more', 'most',
   'best', 'better', 'recommend', 'recommendation', 'recommendations', 'compare', 'comparison', 'price', 'prices',
   'pricing', 'deal', 'deals', 'tool', 'tools', 'platform', 'platforms',
+  'i', 'me', 'my', 'mine', 'we', 'our', 'ours', 'he', 'him', 'his', 'she', 'her', 'hers', 'they', 'them',
+  'wants', 'want', 'need', 'needs', 'girlfriend', 'boyfriend', 'wife', 'husband', 'partner',
   'assistant', 'user', 'please', 'thanks',
   '推荐', '比较', '对比', '价格', '优惠', '哪个好', '什么', '怎么', '可以', '帮我', '一下',
 ])
@@ -7673,14 +7675,33 @@ function extractAssistantEntityTokens(recentTurns = [], options = {}) {
 function buildRetrievalQuery(primaryQuery = '', entities = [], options = {}) {
   const query = clipText(primaryQuery, 1200)
   if (!query) return ''
-  const queryTokenSet = new Set(tokenizeRetrievalText(query))
-  const extraTokens = (Array.isArray(entities) ? entities : [])
-    .map((item) => String(item || '').trim().toLowerCase())
-    .filter((item) => item && !queryTokenSet.has(item))
-    .slice(0, Math.max(1, toPositiveInteger(options.maxEntityTokens, 20)))
+  const maxTokens = Math.max(1, toPositiveInteger(options.maxEntityTokens, 24))
+  const baseTokens = tokenizeRetrievalText(query)
+    .filter((token) => isRetrievalEntityToken(token))
+  const dedupe = new Set()
+  const mergedTokens = []
 
-  const merged = `${query} ${extraTokens.join(' ')}`.trim()
-  return clipText(merged, 1200)
+  for (const token of baseTokens) {
+    if (dedupe.has(token)) continue
+    dedupe.add(token)
+    mergedTokens.push(token)
+    if (mergedTokens.length >= maxTokens) break
+  }
+
+  if (mergedTokens.length < maxTokens) {
+    const extraTokens = (Array.isArray(entities) ? entities : [])
+      .map((item) => String(item || '').trim().toLowerCase())
+      .filter((item) => isRetrievalEntityToken(item))
+    for (const token of extraTokens) {
+      if (dedupe.has(token)) continue
+      dedupe.add(token)
+      mergedTokens.push(token)
+      if (mergedTokens.length >= maxTokens) break
+    }
+  }
+
+  if (mergedTokens.length <= 0) return query
+  return clipText(mergedTokens.join(' '), 1200)
 }
 
 function deriveBidMessageContext(messages = [], options = {}) {

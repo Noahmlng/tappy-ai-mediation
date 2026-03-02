@@ -218,10 +218,14 @@ function normalizeBrandEntityTokens(tokens = []) {
   return normalized
 }
 
-function extractCandidateBrandTokens(candidate = {}) {
+function normalizeBrandComparable(value = '') {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/g, '')
+}
+
+function extractCandidateBrandMatchSignals(candidate = {}) {
   const metadata = candidate?.metadata && typeof candidate.metadata === 'object' ? candidate.metadata : {}
   const tags = Array.isArray(candidate?.tags) ? candidate.tags : []
-  const corpus = [
+  const rows = [
     candidate?.title,
     candidate?.description,
     metadata.brand,
@@ -236,8 +240,11 @@ function extractCandidateBrandTokens(candidate = {}) {
   ]
     .map((item) => String(item || '').trim())
     .filter(Boolean)
-    .join(' ')
-  return new Set(tokenize(corpus))
+  const corpus = rows.join(' ')
+  return {
+    tokenSet: new Set(tokenize(corpus)),
+    normalizedCorpus: normalizeBrandComparable(corpus),
+  }
 }
 
 function computeHouseShare(candidates = [], finalTopK = DEFAULT_FINAL_TOP_K) {
@@ -259,10 +266,14 @@ function applyBrandIntentProtection(candidates = [], policy = {}) {
   const penaltiesApplied = []
 
   const withBrandHits = list.map((candidate) => {
-    const candidateBrandTokens = extractCandidateBrandTokens(candidate)
+    const candidateSignals = extractCandidateBrandMatchSignals(candidate)
     let brandEntityHitCount = 0
     for (const token of brandTokenSet) {
-      if (candidateBrandTokens.has(token)) brandEntityHitCount += 1
+      const normalizedToken = normalizeBrandComparable(token)
+      if (!normalizedToken) continue
+      const directTokenMatched = candidateSignals.tokenSet.has(token)
+      const normalizedMatched = candidateSignals.normalizedCorpus.includes(normalizedToken)
+      if (directTokenMatched || normalizedMatched) brandEntityHitCount += 1
     }
     return {
       ...candidate,
@@ -288,7 +299,11 @@ function applyBrandIntentProtection(candidates = [], policy = {}) {
     if (network !== 'house' || candidate.brandEntityHitCount > 0) {
       return candidate
     }
-    const penaltyApplied = round(penaltyValue)
+    const dynamicPenalty = Math.max(
+      penaltyValue,
+      toFiniteNumber(candidate?.fusedScore, 0) * 0.35,
+    )
+    const penaltyApplied = round(Math.min(0.6, dynamicPenalty))
     const nextFusedScore = round(Math.max(0, toFiniteNumber(candidate?.fusedScore, 0) - penaltyApplied))
     penaltiesApplied.push({
       offerId: cleanText(candidate?.offerId),
@@ -304,12 +319,11 @@ function applyBrandIntentProtection(candidates = [], policy = {}) {
 
   const sorted = [...penalized].sort(compareHybridCandidates)
   const houseShareBeforeCap = computeHouseShare(sorted, finalTopK)
-  const hasPartnerstackBrandHit = sorted.some((candidate) => (
+  const hasPartnerstackCandidate = sorted.some((candidate) => (
     cleanText(candidate?.network).toLowerCase() === 'partnerstack'
-    && toPositiveInteger(candidate?.brandEntityHitCount, 0) > 0
   ))
 
-  if (!hasPartnerstackBrandHit) {
+  if (!hasPartnerstackCandidate) {
     return {
       candidates: sorted,
       brandIntentDetected,

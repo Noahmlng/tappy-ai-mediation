@@ -6,7 +6,9 @@ const BM25_STOPWORDS = new Set([
   'a', 'an', 'and', 'are', 'as', 'at', 'be', 'been', 'being', 'but', 'by', 'can', 'do', 'for', 'from', 'had', 'has',
   'have', 'if', 'in', 'into', 'is', 'it', 'its', 'of', 'on', 'or', 'that', 'the', 'their', 'there', 'these', 'this',
   'those', 'to', 'was', 'were', 'will', 'with', 'you', 'your', 'about', 'what', 'which', 'when', 'where', 'who', 'how',
-  'why', 'tool', 'tools', 'platform', 'platforms', 'solution', 'solutions', 'service', 'services',
+  'why', 'i', 'me', 'my', 'mine', 'we', 'our', 'ours', 'he', 'him', 'his', 'she', 'her', 'hers', 'they', 'them',
+  'wants', 'want', 'need', 'needs', 'girlfriend', 'boyfriend', 'wife', 'husband', 'partner',
+  'tool', 'tools', 'platform', 'platforms', 'solution', 'solutions', 'service', 'services',
   '推荐', '比较', '对比', '价格', '优惠', '什么', '怎么', '可以', '帮我', '一下',
 ])
 

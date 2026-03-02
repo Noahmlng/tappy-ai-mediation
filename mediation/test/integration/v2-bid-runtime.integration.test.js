@@ -684,3 +684,73 @@ test('v2 bid runtime: brand intent cap limits house share when partner brand hit
   assert.equal(result.debug?.houseShareAfterCap <= 0.6, true)
   assert.equal(houseCount <= 3, true)
 })
+
+test('v2 bid runtime: brand token match handles spaced names like Eleven Labs', async () => {
+  const pool = {
+    async query(sql) {
+      if (String(sql).includes('offer_inventory_serving_snapshot')) {
+        return {
+          rows: [
+            makeServingSnapshotRow({
+              offerId: 'house:offer:ghost',
+              network: 'house',
+              title: 'Ghostery developer tools Essential Pick',
+              description: 'General developer productivity suite.',
+              targetUrl: 'https://house.example.com/ghostery',
+            }),
+            makeServingSnapshotRow({
+              offerId: 'partnerstack:voice:elevenlabs',
+              network: 'partnerstack',
+              title: 'Eleven Labs Inc.',
+              description: 'AI voice cloning and multilingual dubbing.',
+              targetUrl: 'https://partner.example.com/elevenlabs',
+            }),
+          ],
+        }
+      }
+      return {
+        rows: [
+          makeInventoryRow({
+            offerId: 'house:offer:ghost',
+            network: 'house',
+            title: 'Ghostery developer tools Essential Pick',
+            description: 'General developer productivity suite.',
+            targetUrl: 'https://house.example.com/ghostery',
+            vectorScore: 0.92,
+          }),
+          makeInventoryRow({
+            offerId: 'partnerstack:voice:elevenlabs',
+            network: 'partnerstack',
+            title: 'Eleven Labs Inc.',
+            description: 'AI voice cloning and multilingual dubbing.',
+            targetUrl: 'https://partner.example.com/elevenlabs',
+            vectorScore: 0.38,
+          }),
+        ],
+      }
+    },
+  }
+
+  const result = await retrieveOpportunityCandidates({
+    query: 'youtube dubbing tools',
+    semanticQuery: 'youtube dubbing tools',
+    sparseQuery: 'youtube dubbing tools elevenlabs',
+    brandEntityTokens: ['elevenlabs'],
+    queryMode: 'latest_user_plus_entities',
+    filters: {
+      networks: ['partnerstack', 'house'],
+      market: 'US',
+      language: 'en-US',
+    },
+    lexicalTopK: 20,
+    vectorTopK: 20,
+    finalTopK: 10,
+  }, {
+    pool,
+  })
+
+  assert.equal(result.debug?.brandIntentDetected, true)
+  assert.equal(result.candidates[0].offerId, 'partnerstack:voice:elevenlabs')
+  assert.equal(result.candidates[0].brandEntityHitCount > 0, true)
+  assert.equal(result.candidates.some((item) => item.offerId === 'house:offer:ghost'), true)
+})
