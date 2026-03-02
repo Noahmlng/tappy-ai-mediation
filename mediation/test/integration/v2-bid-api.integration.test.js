@@ -323,7 +323,7 @@ test('v2 bid API returns unified response on the single runtime path', async () 
         true,
       )
       assert.equal(
-        bid.payload?.diagnostics?.rankingDebug?.thresholdFloorsApplied?.minVectorScore?.effective >= 0.2,
+        bid.payload?.diagnostics?.rankingDebug?.thresholdFloorsApplied?.minVectorScore?.effective >= 0.14,
         true,
       )
       assert.equal(typeof bid.payload?.diagnostics?.relevanceDebug, 'object')
@@ -663,7 +663,7 @@ test('v2 bid API: relevance threshold hard floors stay effective when env min sc
     )
     assert.equal(
       bid.payload?.diagnostics?.rankingDebug?.thresholdFloorsApplied?.minVectorScore?.effective,
-      0.2,
+      0.14,
     )
   } catch (error) {
     const logs = gateway.getLogs()

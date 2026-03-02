@@ -7822,6 +7822,14 @@ function deriveBidMessageContext(messages = [], options = {}) {
   })
   const assistantEntityTokensRaw = assistantEntityExtraction.rawTokens
   const assistantEntityTokensFiltered = assistantEntityExtraction.filteredTokens
+  const latestUserEntityTokenSet = new Set(
+    tokenizeRetrievalText(latestUserQuery).filter((token) => isRetrievalEntityToken(token)),
+  )
+  const brandEntityTokens = assistantEntityTokensFiltered.filter((token) => (
+    tokenizeRetrievalText(token)
+      .filter((part) => isRetrievalEntityToken(part))
+      .some((part) => latestUserEntityTokenSet.has(part))
+  ))
   const semanticQuery = clipText(latestUserQuery || query, 1200)
   const sparseQuery = buildRetrievalQuery(
     semanticQuery,
@@ -7843,7 +7851,7 @@ function deriveBidMessageContext(messages = [], options = {}) {
     assistantEntityTokensRaw,
     assistantEntityTokensFiltered,
     assistantEntityTokens: assistantEntityTokensFiltered,
-    brandEntityTokens: assistantEntityTokensFiltered,
+    brandEntityTokens,
     retrievalQuery,
     recentTurns,
     localeHint,
@@ -8191,9 +8199,9 @@ async function evaluateSinglePlacementOpportunity({
   const hybridDenseWeight = clampNumber(retrievalPolicy?.hybrid?.denseWeight, 0, 1, 0.35)
   const hybridStrategy = String(retrievalPolicy?.hybrid?.strategy || 'rrf_then_linear').trim() || 'rrf_then_linear'
   const configuredMinLexicalScore = clampNumber(runtimeConfig?.relevancePolicy?.minLexicalScore, 0, 1, 0.02)
-  const configuredMinVectorScore = clampNumber(runtimeConfig?.relevancePolicy?.minVectorScore, 0, 1, 0.35)
+  const configuredMinVectorScore = clampNumber(runtimeConfig?.relevancePolicy?.minVectorScore, 0, 1, 0.14)
   const minLexicalScore = Math.max(configuredMinLexicalScore, 0.02)
-  const minVectorScore = Math.max(configuredMinVectorScore, 0.2)
+  const minVectorScore = Math.max(configuredMinVectorScore, 0.14)
   const thresholdFloorsApplied = {
     minLexicalScore: {
       configured: configuredMinLexicalScore,
@@ -8202,7 +8210,7 @@ async function evaluateSinglePlacementOpportunity({
     },
     minVectorScore: {
       configured: configuredMinVectorScore,
-      floor: 0.2,
+      floor: 0.14,
       effective: minVectorScore,
     },
   }
@@ -8842,9 +8850,9 @@ async function evaluateV2BidOpportunityFirst(payload) {
           effective: Math.max(clampNumber(runtimeConfig?.relevancePolicy?.minLexicalScore, 0, 1, 0.02), 0.02),
         },
         minVectorScore: {
-          configured: clampNumber(runtimeConfig?.relevancePolicy?.minVectorScore, 0, 1, 0.35),
-          floor: 0.2,
-          effective: Math.max(clampNumber(runtimeConfig?.relevancePolicy?.minVectorScore, 0, 1, 0.35), 0.2),
+          configured: clampNumber(runtimeConfig?.relevancePolicy?.minVectorScore, 0, 1, 0.14),
+          floor: 0.14,
+          effective: Math.max(clampNumber(runtimeConfig?.relevancePolicy?.minVectorScore, 0, 1, 0.14), 0.14),
         },
       },
     }

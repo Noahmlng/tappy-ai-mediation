@@ -1,6 +1,6 @@
 const DEFAULT_THRESHOLD_VERSION = 'v1_default_2026_03_01'
 const DEFAULT_THRESHOLDS_BY_PLACEMENT = Object.freeze({
-  chat_intent_recommendation_v1: { strict: 0.62, relaxed: 0.48 },
+  chat_intent_recommendation_v1: { strict: 0.5, relaxed: 0.38 },
   chat_from_answer_v1: { strict: 0.58, relaxed: 0.44 },
 })
 const DEFAULT_FALLBACK_THRESHOLDS = Object.freeze({ strict: 0.6, relaxed: 0.46 })
